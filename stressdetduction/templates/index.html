@@ -4,18 +4,19 @@
   <meta charset="utf-8" />
   <title>Stress Detection</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
- <link rel="stylesheet" href="C:\Users\KIIT0001\OneDrive\Desktop\practice\stressdetduction\static\style.css">
 
-
+  <!-- Correct Flask static path -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
+
 <body>
   <div class="container">
     <div class="left-panel">
       <h2>About the Project</h2>
       <p>
         Considering today's lifestyle, people often forget the benefits of sleep.
-        Smart-Yoga Pillow (SaYoPillow) helps relate stress and sleep. An edge device
-        analyzes physiological changes during sleep to predict stress for the next day.
+        Smart-Yoga Pillow (SaYoPillow) helps relate stress and sleep. 
+        An edge device analyzes physiological changes during sleep to predict stress for the next day.
       </p>
       <p class="credit">The Project is made by Khushi Sharma</p>
     </div>
@@ -23,7 +24,7 @@
     <div class="right-panel">
       <div class="logo">
         <div class="brain">🧠</div>
-        <h1>Stress<span class="bold">Detection</span></h1>
+        <h1>Stress <span class="bold">Detection</span></h1>
       </div>
 
       <div class="form">
@@ -46,8 +47,7 @@
     </div>
   </div>
 
- <script src="C:\Users\KIIT0001\OneDrive\Desktop\practice\stressdetduction\static\script.js"></script>
-
+  <!-- Correct Flask static script path -->
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
 </html>
-
