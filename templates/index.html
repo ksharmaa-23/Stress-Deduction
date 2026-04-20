@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Stress Detection</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="bg-orbs">
+    <div class="orb orb1"></div>
+    <div class="orb orb2"></div>
+    <div class="orb orb3"></div>
+  </div>
+
+  <div class="container">
+
+    <!-- LEFT PANEL -->
+    <div class="left-panel">
+      <div class="left-inner">
+        <div class="badge">🧠 AI Health</div>
+        <h1 class="left-title">Smart<br>Stress<br>Detection</h1>
+        <div class="divider"></div>
+        <p class="left-desc">
+          The <strong>SaYoPillow</strong> system analyzes physiological signals during sleep to predict next-day stress levels — helping you take control of your wellbeing.
+        </p>
+        <p class="left-desc">
+          Use <span class="highlight">Physiological</span> inputs or record your <span class="highlight">Voice</span> for an AI-powered stress analysis.
+        </p>
+        <div class="features">
+          <div class="feature-item">
+            <span class="feature-icon">📊</span>
+            <span>Sleep & vitals analysis</span>
+          </div>
+          <div class="feature-item">
+            <span class="feature-icon">🎙️</span>
+            <span>Voice stress detection</span>
+          </div>
+          <div class="feature-item">
+            <span class="feature-icon">⚡</span>
+            <span>Real-time AI prediction</span>
+          </div>
+        </div>
+        
+      </div>
+    </div>
+
+    <!-- RIGHT PANEL -->
+    <div class="right-panel">
+      <div class="panel-header">
+        <div class="brain-icon">🧠</div>
+        <div>
+          <h2 class="panel-title">Stress Detection</h2>
+          <p class="panel-sub">Choose your analysis method</p>
+        </div>
+      </div>
+
+      <!-- TABS -->
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="physiological">
+          <span>📊</span> Physiological
+        </button>
+        <button class="tab-btn" data-tab="voice">
+          <span>🎙️</span> Voice
+        </button>
+      </div>
+
+      <!-- TAB: PHYSIOLOGICAL -->
+      <div class="tab-content active" id="tab-physiological">
+        <div class="form">
+          <div class="input-group">
+            <label>Snoring Range</label>
+            <input id="snoring" type="number" placeholder="0 – 100" />
+          </div>
+          <div class="input-group">
+            <label>Body Temperature</label>
+            <input id="temp" type="number" placeholder="e.g. 98.6°F" />
+          </div>
+          <div class="input-group">
+            <label>Hours of Sleep</label>
+            <input id="hours" type="number" placeholder="e.g. 6 hours" />
+          </div>
+          <div class="input-group">
+            <label>Heart Rate</label>
+            <input id="hr" type="number" placeholder="45 – 220 bpm" />
+          </div>
+          <button id="predictBtn" class="btn-primary">
+            Analyze Stress →
+          </button>
+          <div id="result" class="result-box"></div>
+        </div>
+      </div>
+
+      <!-- TAB: VOICE -->
+      <div class="tab-content" id="tab-voice">
+        <div class="voice-section">
+          <p class="voice-info">Speak naturally for 5–10 seconds. The AI will analyze your stress level from your voice patterns.</p>
+
+          <div class="voice-controls">
+            <button id="recordBtn" class="record-btn">
+              <span class="rec-icon">🎙️</span>
+              <span id="recordLabel">Start Recording</span>
+            </button>
+            <div id="recordTimer" class="record-timer hidden">
+              ⏱️ <span id="timerCount">0</span>s
+            </div>
+          </div>
+
+          <div id="audioPlayback" class="audio-playback hidden">
+            <audio id="audioPlayer" controls></audio>
+          </div>
+
+          <div id="transcriptBox" class="transcript-box hidden">
+            <label>TRANSCRIPT (AUTO-DETECTED):</label>
+            <textarea id="transcriptText" rows="3" placeholder="Transcript will appear here..."></textarea>
+          </div>
+
+          <button id="analyzeBtn" class="btn-primary green hidden">
+            🔍 Analyze Voice
+          </button>
+
+          <div id="voiceResult" class="result-box"></div>
+
+          <!-- UPDATED: Acoustic score details replacing CNN score -->
+          <div id="voiceDetails" class="voice-details hidden">
+            <div class="score-row">
+              <span>Audio Score (Acoustic)</span>
+              <span id="audioScore">—</span>
+            </div>
+            <div class="score-row">
+              <span>NLP Score (Text)</span>
+              <span id="nlpScore">—</span>
+            </div>
+            <div class="score-row">
+              <span>Method</span>
+              <span id="methodLabel">—</span>
+            </div>
+
+            <!-- Acoustic feature breakdown -->
+            <div id="acousticBreakdown" class="acoustic-breakdown hidden">
+              <div class="breakdown-title">🔬 Acoustic Feature Breakdown</div>
+              <div class="score-row">
+                <span>Pitch Mean</span>
+                <span id="featPitchMean">—</span>
+              </div>
+              <div class="score-row">
+                <span>Pitch Variability</span>
+                <span id="featPitchStd">—</span>
+              </div>
+              <div class="score-row">
+                <span>Voice Energy Variation</span>
+                <span id="featRmsCv">—</span>
+              </div>
+              <div class="score-row">
+                <span>Spectral Brightness</span>
+                <span id="featSpectral">—</span>
+              </div>
+              <div class="score-row">
+                <span>Speech Tempo</span>
+                <span id="featTempo">—</span>
+              </div>
+              <div class="score-row">
+                <span>MFCC Variance</span>
+                <span id="featMfcc">—</span>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
