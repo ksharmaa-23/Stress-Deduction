@@ -1,8 +1,9 @@
-
 Flask==3.0.2
+flask-cors
 gunicorn
 numpy
+pandas
 scikit-learn
 joblib
-pandas
-flask-cors
+librosa
+soundfile
