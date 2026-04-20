@@ -10,8 +10,8 @@ from sklearn.metrics import accuracy_score
 import joblib
 
 # ── FFMPEG PATH (Windows) ────────────────────────────────────────────────────
-FFMPEG  = r"C:\Users\KIIT0001\Downloads\ffmpeg-8.1-essentials_build\ffmpeg-8.1-essentials_build\bin\ffmpeg.exe"
-FFPROBE = r"C:\Users\KIIT0001\Downloads\ffmpeg-8.1-essentials_build\ffmpeg-8.1-essentials_build\bin\ffprobe.exe"
+FFMPEG  = "ffmpeg"
+FFPROBE = "ffprobe"
 # ── Optional voice/audio imports ─────────────────────────────────────────────
 try:
     import pickle
