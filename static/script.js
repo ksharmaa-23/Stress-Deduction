@@ -1,4 +1,4 @@
-// ── TAB SWITCHING ────────────────────────────────────────────────────────────
+// ── TAB SWITCHING ─────────────────────────────────────────────────────────────
 document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
@@ -9,18 +9,17 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
 });
 
 
-// ── PHYSIOLOGICAL PREDICTION ──────────────────────────────────────────────────
+// ── PHYSIOLOGICAL PREDICTION — all 8 SaYoPillow fields ───────────────────────
 document.getElementById("predictBtn").addEventListener("click", async () => {
-  const snoring = document.getElementById("snoring").value;
-  const temp    = document.getElementById("temp").value;
-  const hours   = document.getElementById("hours").value;
-  const hr      = document.getElementById("hr").value;
-
   const payload = {
-    snoring_range    : Number(snoring),
-    body_temperature : Number(temp),
-    hours_sleep      : Number(hours),
-    heart_rate       : Number(hr)
+    snoring_range    : Number(document.getElementById("snoring").value || 0),
+    respiration_rate : Number(document.getElementById("rr").value      || 15),
+    body_temperature : Number(document.getElementById("temp").value    || 98.6),
+    limb_movement    : Number(document.getElementById("lm").value      || 8),
+    blood_oxygen     : Number(document.getElementById("bo").value      || 95),
+    eye_movement     : Number(document.getElementById("rem").value     || 12),
+    hours_sleep      : Number(document.getElementById("hours").value   || 7),
+    heart_rate       : Number(document.getElementById("hr").value      || 72)
   };
 
   const resultEl = document.getElementById("result");
@@ -28,7 +27,7 @@ document.getElementById("predictBtn").addEventListener("click", async () => {
   resultEl.className   = "result-box show";
 
   try {
-    const res  = await fetch("/predict", {
+    const res = await fetch("/predict", {
       method : "POST",
       headers: { "Content-Type": "application/json" },
       body   : JSON.stringify(payload)
@@ -72,7 +71,6 @@ const analyzeBtn     = document.getElementById("analyzeBtn");
 const voiceResult    = document.getElementById("voiceResult");
 const voiceDetails   = document.getElementById("voiceDetails");
 
-// Speech Recognition
 function startSpeechRecognition() {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) return;
@@ -111,6 +109,42 @@ function stopTimer() {
   timerInterval = null;
 }
 
+// Convert AudioBuffer → WAV blob (16-bit PCM)
+function audioBufferToWav(buffer) {
+  const numChannels = 1;
+  const sampleRate  = buffer.sampleRate;
+  const samples     = buffer.getChannelData(0);
+  const dataLength  = samples.length * 2;
+  const arrayBuf    = new ArrayBuffer(44 + dataLength);
+  const view        = new DataView(arrayBuf);
+
+  const writeStr = (off, str) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i));
+  };
+
+  writeStr(0, 'RIFF');
+  view.setUint32(4,  36 + dataLength, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16,           true);
+  view.setUint16(20, 1,            true);
+  view.setUint16(22, numChannels,  true);
+  view.setUint32(24, sampleRate,   true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2,            true);
+  view.setUint16(34, 16,           true);
+  writeStr(36, 'data');
+  view.setUint32(40, dataLength, true);
+
+  let offset = 44;
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    offset += 2;
+  }
+  return new Blob([arrayBuf], { type: "audio/wav" });
+}
+
 recordBtn.addEventListener("click", async () => {
   if (mediaRecorder && mediaRecorder.state === "recording") {
     mediaRecorder.stop();
@@ -130,8 +164,17 @@ recordBtn.addEventListener("click", async () => {
 
     mediaRecorder = new MediaRecorder(stream);
     mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
-    mediaRecorder.onstop = () => {
-      recordedBlob = new Blob(audioChunks, { type: "audio/webm" });
+    mediaRecorder.onstop = async () => {
+      // Convert to WAV so server can read it with soundfile
+      const rawBlob     = new Blob(audioChunks, { type: "audio/webm" });
+      const arrayBuffer = await rawBlob.arrayBuffer();
+      try {
+        const audioCtx    = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+        recordedBlob      = audioBufferToWav(audioBuffer);
+      } catch(e) {
+        recordedBlob = rawBlob; // fallback
+      }
       audioPlayer.src = URL.createObjectURL(recordedBlob);
       audioPlayback.classList.remove("hidden");
       transcriptBox.classList.remove("hidden");
@@ -178,7 +221,7 @@ analyzeBtn.addEventListener("click", async () => {
 
   try {
     const formData = new FormData();
-    formData.append("audio",      recordedBlob, "recording.webm");
+    formData.append("audio",      recordedBlob, "recording.wav");
     formData.append("transcript", transcriptText.value.trim());
 
     const res = await fetch("/predict-voice", { method: "POST", body: formData });
@@ -201,41 +244,23 @@ analyzeBtn.addEventListener("click", async () => {
     voiceResult.textContent = `${data.message}  (${conf}% confidence)`;
     voiceResult.className   = "result-box show " + (isStressed ? "high" : "low");
 
-    // ── UPDATED: use audio_score instead of cnn_score ──────────────────────
     document.getElementById("audioScore").textContent =
-      data.audio_score
-        ? `${(data.audio_score.stressed * 100).toFixed(1)}% stressed`
-        : "—";
+      data.audio_score ? `${(data.audio_score.stressed * 100).toFixed(1)}% stressed` : "—";
 
     document.getElementById("nlpScore").textContent =
       data.nlp_score && data.nlp_score.stressed !== null
-        ? `${(data.nlp_score.stressed * 100).toFixed(1)}% stressed`
-        : "N/A";
+        ? `${(data.nlp_score.stressed * 100).toFixed(1)}% stressed` : "N/A";
 
     document.getElementById("methodLabel").textContent = data.method || "—";
 
-    // ── Acoustic feature breakdown ─────────────────────────────────────────
     if (data.acoustic_features) {
       const af = data.acoustic_features;
-
-      document.getElementById("featPitchMean").textContent =
-        af.pitch_mean_hz + " Hz";
-
-      document.getElementById("featPitchStd").textContent =
-        af.pitch_std_hz + " Hz (σ)";
-
-      document.getElementById("featRmsCv").textContent =
-        (af.rms_variability * 100).toFixed(1) + "%";
-
-      document.getElementById("featSpectral").textContent =
-        af.spectral_centroid + " Hz";
-
-      document.getElementById("featTempo").textContent =
-        af.tempo_bpm + " BPM";
-
-      document.getElementById("featMfcc").textContent =
-        af.mfcc_variance;
-
+      document.getElementById("featPitchMean").textContent = af.pitch_mean_hz + " Hz";
+      document.getElementById("featPitchStd").textContent  = af.pitch_std_hz + " Hz (σ)";
+      document.getElementById("featRmsCv").textContent     = (af.rms_variability * 100).toFixed(1) + "%";
+      document.getElementById("featSpectral").textContent  = af.spectral_centroid + " Hz";
+      document.getElementById("featTempo").textContent     = af.tempo_bpm ? af.tempo_bpm + " BPM" : "—";
+      document.getElementById("featMfcc").textContent      = af.mfcc_variance;
       document.getElementById("acousticBreakdown").classList.remove("hidden");
     }
 
