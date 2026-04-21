@@ -2,6 +2,8 @@ from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 import os
 import io
+import wave
+import struct
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
@@ -9,14 +11,6 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import StandardScaler
 import joblib
-import struct
-import wave
-
-try:
-    import soundfile as sf
-    SOUNDFILE_AVAILABLE = True
-except ImportError:
-    SOUNDFILE_AVAILABLE = False
 
 MODEL_PATH       = "model.joblib"
 VOICE_MODEL_PATH = "voice_model.joblib"
@@ -39,7 +33,6 @@ def train_physiological_model():
         X = df[feature_cols]
         y = (df['stress_level'] >= 2).astype(int)
     else:
-        print("[INFO] CSV not found, using synthetic data...")
         np.random.seed(42)
         n = 4000
         X = pd.DataFrame({
@@ -110,62 +103,94 @@ print(f"[INFO] Voice model: {'ENABLED' if VOICE_ENABLED else 'DISABLED'}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. AUDIO READING — handles WAV bytes directly
+# 3. AUDIO READING
 # ─────────────────────────────────────────────────────────────────────────────
-def read_wav_bytes(audio_bytes):
-    """Read WAV audio from raw bytes using Python's built-in wave module."""
+def read_audio_bytes(audio_bytes):
+    """Try multiple methods to read audio bytes into numpy array."""
+    
+    # Method 1: Python built-in wave module (for proper WAV files)
     try:
         buf = io.BytesIO(audio_bytes)
         with wave.open(buf, 'rb') as wf:
-            n_channels  = wf.getnchannels()
-            sampwidth   = wf.getsampwidth()
-            framerate   = wf.getframerate()
-            n_frames    = wf.getnframes()
-            raw_data    = wf.readframes(n_frames)
-
-        # Convert bytes to numpy array
+            n_channels = wf.getnchannels()
+            sampwidth  = wf.getsampwidth()
+            framerate  = wf.getframerate()
+            n_frames   = wf.getnframes()
+            raw        = wf.readframes(n_frames)
+        
         if sampwidth == 2:
-            samples = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32) / 32768.0
+            samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
         elif sampwidth == 4:
-            samples = np.frombuffer(raw_data, dtype=np.int32).astype(np.float32) / 2147483648.0
+            samples = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
         else:
-            samples = np.frombuffer(raw_data, dtype=np.uint8).astype(np.float32) / 128.0 - 1.0
-
-        # Stereo to mono
+            samples = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) / 128.0 - 1.0
+        
         if n_channels > 1:
             samples = samples.reshape(-1, n_channels).mean(axis=1)
-
+        
+        print(f"[DEBUG] wave module: {len(samples)} samples at {framerate}Hz")
         return samples, framerate
     except Exception as e:
-        print(f"[WARN] wave module failed: {e}")
-        return None, None
+        print(f"[DEBUG] wave failed: {e}")
+
+    # Method 2: Parse WAV manually (handles non-standard WAV from AudioContext)
+    try:
+        data = audio_bytes
+        # Find 'data' chunk
+        idx = data.find(b'data')
+        fmt_idx = data.find(b'fmt ')
+        
+        if idx > 0 and fmt_idx > 0:
+            # Parse fmt chunk
+            fmt_data = data[fmt_idx+8:fmt_idx+24]
+            audio_format, n_ch, sample_rate, _, _, bits = struct.unpack('<HHIIHH', fmt_data)
+            
+            # Get audio data
+            data_size = struct.unpack('<I', data[idx+4:idx+8])[0]
+            audio_data = data[idx+8:idx+8+data_size]
+            
+            if bits == 16:
+                samples = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+            elif bits == 32:
+                samples = np.frombuffer(audio_data, dtype=np.int32).astype(np.float32) / 2147483648.0
+            else:
+                samples = np.frombuffer(audio_data, dtype=np.float32)
+            
+            if n_ch > 1:
+                samples = samples.reshape(-1, n_ch).mean(axis=1)
+            
+            print(f"[DEBUG] manual WAV parse: {len(samples)} samples at {sample_rate}Hz")
+            return samples, sample_rate
+    except Exception as e:
+        print(f"[DEBUG] manual WAV parse failed: {e}")
+
+    # Method 3: Try soundfile
+    try:
+        import soundfile as sf
+        buf = io.BytesIO(audio_bytes)
+        samples, sr = sf.read(buf, dtype='float32')
+        if len(samples.shape) > 1:
+            samples = samples.mean(axis=1)
+        print(f"[DEBUG] soundfile: {len(samples)} samples at {sr}Hz")
+        return samples, sr
+    except Exception as e:
+        print(f"[DEBUG] soundfile failed: {e}")
+
+    print("[WARN] All audio reading methods failed")
+    return None, None
 
 
 def extract_audio_features(audio_bytes):
-    """Extract features from WAV audio bytes."""
-    # Try Python's built-in wave module first
-    y, sr = read_wav_bytes(audio_bytes)
-
-    # Fallback to soundfile
-    if y is None and SOUNDFILE_AVAILABLE:
-        try:
-            buf = io.BytesIO(audio_bytes)
-            y, sr = sf.read(buf, dtype='float32')
-            if len(y.shape) > 1:
-                y = y.mean(axis=1)
-        except Exception as e:
-            print(f"[WARN] soundfile failed: {e}")
-            y = None
-
+    y, sr = read_audio_bytes(audio_bytes)
+    
     if y is None or len(y) < 100:
         return None
-
+    
     sr = sr or 16000
-    frame_size = min(512, len(y) // 4)
-    if frame_size < 64:
-        return None
-
-    frames = [y[i:i+frame_size] for i in range(0, len(y)-frame_size, frame_size//2)]
+    frame_size = min(512, max(64, len(y) // 8))
+    hop = frame_size // 2
+    frames = [y[i:i+frame_size] for i in range(0, len(y)-frame_size, hop)]
+    
     if not frames:
         return None
 
@@ -174,18 +199,15 @@ def extract_audio_features(audio_bytes):
     rms_cv   = float(np.std(rms_vals) / (np.mean(rms_vals) + 1e-9))
 
     # ZCR
-    zcr_mean = float(np.mean([
-        np.sum(np.abs(np.diff(np.sign(f)))) / (2 * len(f))
-        for f in frames
-    ]))
+    zcr_vals = [np.sum(np.abs(np.diff(np.sign(f)))) / (2 * len(f)) for f in frames]
+    zcr_mean = float(np.mean(zcr_vals))
 
     # Spectral centroid
     sc_vals = []
     for f in frames:
         spec  = np.abs(np.fft.rfft(f))
         freqs = np.fft.rfftfreq(len(f), 1.0/sr)
-        denom = np.sum(spec) + 1e-9
-        sc_vals.append(float(np.sum(freqs * spec) / denom))
+        sc_vals.append(float(np.sum(freqs * spec) / (np.sum(spec) + 1e-9)))
     spectral_centroid_mean = float(np.mean(sc_vals))
 
     # Pitch via autocorrelation
@@ -194,23 +216,19 @@ def extract_audio_features(audio_bytes):
     min_lag = max(1, int(sr / 400))
     max_lag = min(len(corr) - 1, int(sr / 70))
     if max_lag > min_lag:
-        peak_lag   = np.argmax(corr[min_lag:max_lag]) + min_lag
-        pitch_mean = float(sr / peak_lag) if peak_lag > 0 else 150.0
+        peak    = np.argmax(corr[min_lag:max_lag]) + min_lag
+        pitch_mean = float(sr / peak) if peak > 0 else 150.0
     else:
         pitch_mean = 150.0
 
-    pitch_std   = rms_cv * 30
-    mfcc_var    = float(np.var(y) * 1000)
-    speech_rate = zcr_mean
-
     return {
         'pitch_mean':             pitch_mean,
-        'pitch_std':              pitch_std,
+        'pitch_std':              rms_cv * 30,
         'rms_cv':                 rms_cv,
         'zcr_mean':               zcr_mean,
         'spectral_centroid_mean': spectral_centroid_mean,
-        'mfcc_var_mean':          mfcc_var,
-        'speech_rate':            speech_rate,
+        'mfcc_var_mean':          float(np.var(y) * 1000),
+        'speech_rate':            zcr_mean,
     }
 
 
@@ -265,11 +283,11 @@ def predict_voice():
             return jsonify({"error": "No audio file sent"}), 400
 
         audio_bytes = request.files["audio"].read()
-        print(f"[DEBUG] Received audio: {len(audio_bytes)} bytes")
+        print(f"[DEBUG] Audio received: {len(audio_bytes)} bytes, first 4: {audio_bytes[:4]}")
 
         features = extract_audio_features(audio_bytes)
         if features is None:
-            return jsonify({"error": "Could not process audio. Please speak for at least 2 seconds."}), 400
+            return jsonify({"error": "Could not process audio. Please speak for at least 2 seconds and try again."}), 400
 
         feat_order  = voice_features or ['pitch_mean','pitch_std','rms_cv','zcr_mean',
                                           'spectral_centroid_mean','mfcc_var_mean','speech_rate']
@@ -279,15 +297,14 @@ def predict_voice():
         pred  = voice_model.predict(feat_scaled)[0]
         proba = voice_model.predict_proba(feat_scaled)[0]
         label = "Stressed" if pred == 1 else "Not Stressed"
-
-        sp = float(proba[1]) if len(proba) > 1 else float(pred)
-        np_ = float(proba[0]) if len(proba) > 1 else 1 - float(pred)
+        sp    = float(proba[1]) if len(proba) > 1 else float(pred)
+        nsp   = float(proba[0]) if len(proba) > 1 else 1 - float(pred)
 
         return jsonify({
             "prediction"  : label,
             "stress_level": label,
-            "confidence"  : {"stressed": round(sp, 4), "not_stressed": round(np_, 4)},
-            "audio_score" : {"stressed": round(sp, 4), "not_stressed": round(np_, 4)},
+            "confidence"  : {"stressed": round(sp, 4), "not_stressed": round(nsp, 4)},
+            "audio_score" : {"stressed": round(sp, 4), "not_stressed": round(nsp, 4)},
             "nlp_score"   : {"stressed": None, "not_stressed": None},
             "acoustic_features": {
                 "pitch_mean_hz"    : round(features.get("pitch_mean", 0), 1),
