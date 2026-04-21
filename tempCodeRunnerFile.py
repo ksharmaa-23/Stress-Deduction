@@ -1,4 +1,42 @@
+from flask import Flask, request, jsonify, render_template
+from flask_cors import CORS
+import os
+import subprocess
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+import joblib
 
+# ── FFMPEG PATH (Windows) ────────────────────────────────────────────────────
+result = subprocess.run(
+    ["ffmpeg", "-y", "-i", tmp_path, "-ar", str(sr), wav_path],
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE
+)
+# ── Optional voice/audio imports ─────────────────────────────────────────────
+try:
+    import pickle
+    import librosa
+    import librosa.feature
+    VOICE_LIBS_AVAILABLE = True
+except ImportError:
+    VOICE_LIBS_AVAILABLE = False
+    print("[WARN] Voice libraries not installed. Voice prediction disabled.")
+
+# PyTorch is optional now — we don't use the CNN anymore
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
+MODEL_PATH      = "model.joblib"
+NLP_MODEL_PATH  = "nlp_model.pkl"
+VECTORIZER_PATH = "vectorizer.pkl"
+
+app = Flask(__name__, static_folder="static", template_folder="templates")
+CORS(app)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -45,42 +83,12 @@ rf_model = load_rf_model()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2.  VOICE / CNN MODEL
+# 2.  NLP MODEL (text only, CNN removed)
 # ─────────────────────────────────────────────────────────────────────────────
-cnn_model  = None
 nlp_model  = None
 vectorizer = None
 
 if VOICE_LIBS_AVAILABLE:
-    class StressCNN(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.conv1   = nn.Conv2d(1, 16, kernel_size=3, padding=1)
-            self.conv2   = nn.Conv2d(16, 32, kernel_size=3, padding=1)
-            self.pool    = nn.AdaptiveAvgPool2d((10, 10))
-            self.fc1     = nn.Linear(32 * 10 * 10, 64)
-            self.fc2     = nn.Linear(64, 2)
-            self.relu    = nn.ReLU()
-            self.dropout = nn.Dropout(0.3)
-
-        def forward(self, x):
-            x = self.relu(self.conv1(x))
-            x = self.relu(self.conv2(x))
-            x = self.pool(x)
-            x = x.view(x.size(0), -1)
-            x = self.dropout(self.relu(self.fc1(x)))
-            return self.fc2(x)
-
-    if os.path.exists(CNN_MODEL_PATH):
-        try:
-            cnn_model = StressCNN()
-            cnn_model.load_state_dict(torch.load(CNN_MODEL_PATH, map_location="cpu"))
-            cnn_model.eval()
-            print("[OK] CNN voice model loaded.")
-        except Exception as e:
-            print(f"[WARN] Could not load CNN model: {e}")
-            cnn_model = None
-
     if os.path.exists(VECTORIZER_PATH) and os.path.exists(NLP_MODEL_PATH):
         try:
             vectorizer = pickle.load(open(VECTORIZER_PATH, "rb"))
@@ -89,14 +97,20 @@ if VOICE_LIBS_AVAILABLE:
         except Exception as e:
             print(f"[WARN] Could not load NLP model: {e}")
 
-VOICE_ENABLED = cnn_model is not None
-print(f"[INFO] Voice prediction: {'ENABLED' if VOICE_ENABLED else 'DISABLED (model files not found)'}")
+VOICE_ENABLED = VOICE_LIBS_AVAILABLE
+print(f"[INFO] Voice prediction: {'ENABLED (audio features)' if VOICE_ENABLED else 'DISABLED'}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3.  HELPERS FOR VOICE
+# 3.  AUDIO-FEATURE-BASED STRESS DETECTION  (replaces CNN)
+#     Uses real acoustic correlates of stress from speech science:
+#     - Pitch (F0): stressed speech has higher & more variable pitch
+#     - Energy (RMS): stressed speech is louder with more variation
+#     - Speaking rate (ZCR proxy): faster/irregular in stress
+#     - Spectral centroid: higher in stressed speech (more high freq energy)
+#     - MFCCs variance: more variable under stress
 # ─────────────────────────────────────────────────────────────────────────────
-def extract_mfcc(audio_bytes, sr=16000, n_mfcc=40, max_len=100):
+def extract_audio_features(audio_bytes, sr=16000):
     import tempfile, uuid
 
     tmp_path = os.path.join(tempfile.gettempdir(), f"stress_{uuid.uuid4().hex}.webm")
@@ -106,11 +120,9 @@ def extract_mfcc(audio_bytes, sr=16000, n_mfcc=40, max_len=100):
         with open(tmp_path, 'wb') as f:
             f.write(audio_bytes)
 
-        # Call ffmpeg directly using full path — bypasses pydub detection
         result = subprocess.run(
-            [FFMPEG, "-y", "-i", tmp_path, wav_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            [FFMPEG, "-y", "-i", tmp_path, "-ar", str(sr), wav_path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
         if result.returncode != 0:
             raise RuntimeError(f"ffmpeg error: {result.stderr.decode()}")
@@ -118,26 +130,172 @@ def extract_mfcc(audio_bytes, sr=16000, n_mfcc=40, max_len=100):
         y, _ = librosa.load(wav_path, sr=sr)
 
     finally:
-        try:
-            if os.path.exists(tmp_path): os.remove(tmp_path)
-        except: pass
-        try:
-            if os.path.exists(wav_path): os.remove(wav_path)
-        except: pass
+        for p in [tmp_path, wav_path]:
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except:
+                pass
 
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=n_mfcc)
-    if mfcc.shape[1] < max_len:
-        mfcc = np.pad(mfcc, ((0, 0), (0, max_len - mfcc.shape[1])), mode='constant')
+    if len(y) < sr * 0.3:
+        raise ValueError("Audio too short (< 0.3 seconds). Please speak longer.")
+
+    features = {}
+
+    # ── Pitch (F0) ────────────────────────────────────────────────────────────
+    f0, voiced_flag, _ = librosa.pyin(
+        y, fmin=librosa.note_to_hz('C2'),
+        fmax=librosa.note_to_hz('C7'), sr=sr
+    )
+    voiced_f0 = f0[voiced_flag & ~np.isnan(f0)]
+    if len(voiced_f0) > 5:
+        features['pitch_mean']   = float(np.mean(voiced_f0))
+        features['pitch_std']    = float(np.std(voiced_f0))
+        features['pitch_range']  = float(np.ptp(voiced_f0))   # max-min
+        features['voiced_ratio'] = float(np.sum(voiced_flag) / len(voiced_flag))
     else:
-        mfcc = mfcc[:, :max_len]
-    return mfcc
+        features['pitch_mean']   = 150.0
+        features['pitch_std']    = 20.0
+        features['pitch_range']  = 40.0
+        features['voiced_ratio'] = 0.4
 
-def predict_cnn(audio_bytes):
-    mfcc   = extract_mfcc(audio_bytes)
-    tensor = torch.tensor(mfcc, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-    with torch.no_grad():
-        probs = torch.softmax(cnn_model(tensor), dim=1).squeeze()
-    return float(probs[1]), float(probs[0])
+    # ── Energy (RMS) ──────────────────────────────────────────────────────────
+    rms = librosa.feature.rms(y=y)[0]
+    features['rms_mean'] = float(np.mean(rms))
+    features['rms_std']  = float(np.std(rms))
+    features['rms_cv']   = float(np.std(rms) / (np.mean(rms) + 1e-9))  # coeff variation
+
+    # ── Spectral centroid (brightness) ────────────────────────────────────────
+    sc = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
+    features['spectral_centroid_mean'] = float(np.mean(sc))
+    features['spectral_centroid_std']  = float(np.std(sc))
+
+    # ── Zero-crossing rate (speaking rate proxy) ──────────────────────────────
+    zcr = librosa.feature.zero_crossing_rate(y)[0]
+    features['zcr_mean'] = float(np.mean(zcr))
+    features['zcr_std']  = float(np.std(zcr))
+
+    # ── MFCC variability ──────────────────────────────────────────────────────
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+    features['mfcc_var_mean'] = float(np.mean(np.var(mfcc, axis=1)))
+
+    # ── Tempo ─────────────────────────────────────────────────────────────────
+    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+    features['tempo'] = float(tempo) if not np.isnan(tempo) else 120.0
+
+    return features, y, sr
+
+
+def score_stress_from_features(features):
+    """
+    Rule-based scoring grounded in speech stress research.
+    Returns (stress_prob, not_stressed_prob, detail_dict)
+    """
+    score = 0.0
+    max_score = 0.0
+    detail = {}
+
+    # ── 1. Pitch mean (higher = more stressed, typical range 80-300 Hz) ───────
+    pm = features['pitch_mean']
+    max_score += 20
+    if pm > 220:
+        pts = 20
+    elif pm > 180:
+        pts = 14
+    elif pm > 140:
+        pts = 8
+    else:
+        pts = 3
+    score += pts
+    detail['pitch_mean_score'] = pts
+
+    # ── 2. Pitch variability (high std = stressed/emotional speech) ───────────
+    ps = features['pitch_std']
+    max_score += 20
+    if ps > 60:
+        pts = 20
+    elif ps > 40:
+        pts = 14
+    elif ps > 25:
+        pts = 8
+    else:
+        pts = 3
+    score += pts
+    detail['pitch_std_score'] = pts
+
+    # ── 3. RMS coefficient of variation (erratic loudness = stress) ──────────
+    rcv = features['rms_cv']
+    max_score += 15
+    if rcv > 1.0:
+        pts = 15
+    elif rcv > 0.7:
+        pts = 10
+    elif rcv > 0.4:
+        pts = 6
+    else:
+        pts = 2
+    score += pts
+    detail['rms_cv_score'] = pts
+
+    # ── 4. Spectral centroid (brighter/higher = more stressed) ───────────────
+    scm = features['spectral_centroid_mean']
+    max_score += 15
+    if scm > 3000:
+        pts = 15
+    elif scm > 2000:
+        pts = 10
+    elif scm > 1200:
+        pts = 6
+    else:
+        pts = 2
+    score += pts
+    detail['spectral_centroid_score'] = pts
+
+    # ── 5. ZCR mean (higher crossing = faster/more tense articulation) ────────
+    zm = features['zcr_mean']
+    max_score += 15
+    if zm > 0.12:
+        pts = 15
+    elif zm > 0.08:
+        pts = 10
+    elif zm > 0.05:
+        pts = 6
+    else:
+        pts = 2
+    score += pts
+    detail['zcr_score'] = pts
+
+    # ── 6. MFCC variance (more spectral change = more emotional speech) ───────
+    mv = features['mfcc_var_mean']
+    max_score += 15
+    if mv > 200:
+        pts = 15
+    elif mv > 100:
+        pts = 10
+    elif mv > 50:
+        pts = 6
+    else:
+        pts = 2
+    score += pts
+    detail['mfcc_var_score'] = pts
+
+    # ── Normalise to probability ──────────────────────────────────────────────
+    raw_prob = score / max_score          # 0..1
+    # Apply a mild sigmoid stretch so mid-values don't all cluster around 0.5
+    import math
+    stretched = 1 / (1 + math.exp(-8 * (raw_prob - 0.5)))
+    stress_prob      = round(stretched, 4)
+    not_stress_prob  = round(1.0 - stretched, 4)
+
+    return stress_prob, not_stress_prob, detail
+
+
+def predict_audio_stress(audio_bytes):
+    """Main entry: extract features → score → return probs + debug info."""
+    features, y, sr = extract_audio_features(audio_bytes)
+    stress_p, not_stress_p, detail = score_stress_from_features(features)
+    return stress_p, not_stress_p, features, detail
+
 
 def predict_nlp_text(text):
     if not text or not text.strip() or vectorizer is None or nlp_model is None:
@@ -146,10 +304,11 @@ def predict_nlp_text(text):
     prob = nlp_model.predict_proba(vec)[0]
     return float(prob[1]), float(prob[0])
 
-def combine_voice_scores(cnn_s, cnn_ns, nlp_s, nlp_ns):
+
+def combine_voice_scores(audio_s, audio_ns, nlp_s, nlp_ns):
     if nlp_s is None:
-        return cnn_s, cnn_ns, "cnn_only"
-    return (0.5*cnn_s + 0.5*nlp_s), (0.5*cnn_ns + 0.5*nlp_ns), "cnn+nlp"
+        return audio_s, audio_ns, "audio_features_only"
+    return (0.6*audio_s + 0.4*nlp_s), (0.6*audio_ns + 0.4*nlp_ns), "audio+nlp"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -187,7 +346,7 @@ def predict_physiological():
 def predict_voice():
     import traceback
     if not VOICE_ENABLED:
-        return jsonify({"error": "Voice model not available on this server."}), 503
+        return jsonify({"error": "Voice libraries (librosa) not available on this server."}), 503
     try:
         if "audio" not in request.files:
             return jsonify({"error": "No audio file sent"}), 400
@@ -196,24 +355,44 @@ def predict_voice():
         transcript  = request.form.get("transcript", "").strip()
         print(f"[DEBUG] Audio: {len(audio_bytes)} bytes | Transcript: '{transcript}'")
 
-        cnn_s, cnn_ns             = predict_cnn(audio_bytes)
-        nlp_s, nlp_ns             = predict_nlp_text(transcript)
-        final_s, final_ns, method = combine_voice_scores(cnn_s, cnn_ns, nlp_s, nlp_ns)
+        # ── Audio feature-based prediction (replaces CNN) ─────────────────
+        audio_s, audio_ns, features, feat_detail = predict_audio_stress(audio_bytes)
+
+        # ── NLP text prediction (optional) ────────────────────────────────
+        nlp_s, nlp_ns = predict_nlp_text(transcript)
+
+        # ── Combine ───────────────────────────────────────────────────────
+        final_s, final_ns, method = combine_voice_scores(audio_s, audio_ns, nlp_s, nlp_ns)
 
         label = "Stressed" if final_s > final_ns else "Not Stressed"
+
         return jsonify({
-            "prediction"  : label,
-            "stress_level": label,
-            "confidence"  : {"stressed": round(final_s, 4), "not_stressed": round(final_ns, 4)},
-            "cnn_score"   : {"stressed": round(cnn_s, 4),   "not_stressed": round(cnn_ns, 4)},
-            "nlp_score"   : {
+            "prediction"   : label,
+            "stress_level" : label,
+            "confidence"   : {"stressed": round(final_s, 4), "not_stressed": round(final_ns, 4)},
+            "audio_score"  : {"stressed": round(audio_s, 4), "not_stressed": round(audio_ns, 4)},
+            "nlp_score"    : {
                 "stressed":     round(nlp_s, 4) if nlp_s is not None else None,
                 "not_stressed": round(nlp_ns, 4) if nlp_ns is not None else None
             },
-            "transcript"  : transcript or None,
-            "method"      : method,
-            "message"     : f"Voice Analysis: {label}"
+            "acoustic_features": {
+                "pitch_mean_hz"      : round(features.get("pitch_mean", 0), 1),
+                "pitch_std_hz"       : round(features.get("pitch_std", 0), 1),
+                "pitch_range_hz"     : round(features.get("pitch_range", 0), 1),
+                "voiced_ratio"       : round(features.get("voiced_ratio", 0), 3),
+                "rms_mean"           : round(features.get("rms_mean", 0), 5),
+                "rms_variability"    : round(features.get("rms_cv", 0), 3),
+                "spectral_centroid"  : round(features.get("spectral_centroid_mean", 0), 1),
+                "zcr_mean"           : round(features.get("zcr_mean", 0), 5),
+                "mfcc_variance"      : round(features.get("mfcc_var_mean", 0), 2),
+                "tempo_bpm"          : round(features.get("tempo", 0), 1),
+            },
+            "transcript"   : transcript or None,
+            "method"       : method,
+            "message"      : f"Voice Analysis: {label}"
         })
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
     except Exception as e:
         tb = traceback.format_exc()
         print(tb)

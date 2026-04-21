@@ -10,8 +10,10 @@ from sklearn.metrics import accuracy_score
 import joblib
 
 # ── FFMPEG PATH (Windows) ────────────────────────────────────────────────────
-FFMPEG  = "ffmpeg"
-FFPROBE = "ffprobe"
+result = subprocess.run(
+    ["ffmpeg", "-y", "-i", tmp_path, "-ar", str(sr), wav_path],
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE
+)
 # ── Optional voice/audio imports ─────────────────────────────────────────────
 try:
     import pickle
