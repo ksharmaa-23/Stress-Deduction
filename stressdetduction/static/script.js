@@ -11,23 +11,15 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
 
 // ── PHYSIOLOGICAL PREDICTION ──────────────────────────────────────────────────
 document.getElementById("predictBtn").addEventListener("click", async () => {
-  const snoring = document.getElementById("snoring").value;
-  const temp    = document.getElementById("temp").value;
-  const hours   = document.getElementById("hours").value;
-  const hr      = document.getElementById("hr").value;
-
   const payload = {
-    snoring_range: Number(snoring),
-    respiration_rate : Number(document.getElementById("rr")?.value || 15),
-    body_temperature : Number(temp),
-    limb_movement    : Number(document.getElementById("lm")?.value || 8),
-    blood_oxygen     : Number(document.getElementById("bo")?.value || 97),
-    eye_movement     : Number(document.getElementById("rem")?.value || 12),
-    hours_sleep      : Number(hours),
-    heart_rate       : Number(hr,
-    body_temperature : Number(temp),
-    hours_sleep      : Number(hours),
-    heart_rate       : Number(hr)
+    snoring_range    : Number(document.getElementById("snoring")?.value || 0),
+    respiration_rate : Number(document.getElementById("rr")?.value     || 15),
+    body_temperature : Number(document.getElementById("temp")?.value   || 98.6),
+    limb_movement    : Number(document.getElementById("lm")?.value     || 8),
+    blood_oxygen     : Number(document.getElementById("bo")?.value     || 97),
+    eye_movement     : Number(document.getElementById("rem")?.value    || 12),
+    hours_sleep      : Number(document.getElementById("hours")?.value  || 7),
+    heart_rate       : Number(document.getElementById("hr")?.value     || 72)
   };
 
   const resultEl = document.getElementById("result");
@@ -135,10 +127,20 @@ recordBtn.addEventListener("click", async () => {
     transcript  = "";
     transcriptText.value = "";
 
-    mediaRecorder = new MediaRecorder(stream);
+    // Prefer audio/webm;codecs=opus, fall back to whatever is supported
+    const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+      ? "audio/webm;codecs=opus"
+      : MediaRecorder.isTypeSupported("audio/webm")
+      ? "audio/webm"
+      : "";
+
+    mediaRecorder = mimeType
+      ? new MediaRecorder(stream, { mimeType })
+      : new MediaRecorder(stream);
+
     mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
     mediaRecorder.onstop = () => {
-      recordedBlob = new Blob(audioChunks, { type: "audio/webm" });
+      recordedBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType || "audio/webm" });
       audioPlayer.src = URL.createObjectURL(recordedBlob);
       audioPlayback.classList.remove("hidden");
       transcriptBox.classList.remove("hidden");
@@ -154,6 +156,7 @@ recordBtn.addEventListener("click", async () => {
     recordLabel.textContent = "Stop Recording";
     recordBtn.querySelector(".rec-icon").textContent = "⏹️";
 
+    // Auto-stop after 60s
     setTimeout(() => {
       if (mediaRecorder && mediaRecorder.state === "recording") {
         mediaRecorder.stop();
@@ -184,11 +187,19 @@ analyzeBtn.addEventListener("click", async () => {
   analyzeBtn.disabled = true;
 
   try {
-    // Convert webm to WAV using AudioContext
+    // Decode audio with AudioContext then re-encode as 16-bit PCM WAV
     const arrayBuffer = await recordedBlob.arrayBuffer();
     const audioCtx    = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-    const wavBlob     = audioBufferToWav(audioBuffer);
+
+    let wavBlob;
+    try {
+      const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+      wavBlob = audioBufferToWav(audioBuffer);
+    } catch (decodeErr) {
+      // If decode fails, send the raw blob as-is and let the server handle it
+      console.warn("AudioContext decode failed, sending raw blob:", decodeErr);
+      wavBlob = recordedBlob;
+    }
 
     const formData = new FormData();
     formData.append("audio",      wavBlob, "recording.wav");
@@ -235,20 +246,15 @@ analyzeBtn.addEventListener("click", async () => {
     const methodEl = document.getElementById("methodLabel");
     if (methodEl) methodEl.textContent = data.method || "—";
 
-    // Acoustic features
     if (data.acoustic_features) {
       const af = data.acoustic_features;
-      const set = (id, val) => {
-        const el = document.getElementById(id);
-        if (el) el.textContent = val;
-      };
+      const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
       set("featPitchMean",  (af.pitch_mean_hz || 0) + " Hz");
       set("featPitchStd",   (af.pitch_std_hz  || 0) + " Hz");
       set("featRmsCv",      ((af.rms_variability || 0) * 100).toFixed(1) + "%");
       set("featSpectral",   (af.spectral_centroid || 0) + " Hz");
       set("featTempo",      "—");
       set("featMfcc",       (af.mfcc_variance || 0).toFixed(2));
-
       const breakdown = document.getElementById("acousticBreakdown");
       if (breakdown) breakdown.classList.remove("hidden");
     }
@@ -264,12 +270,12 @@ analyzeBtn.addEventListener("click", async () => {
 });
 
 
-// ── Convert AudioBuffer → WAV blob ───────────────────────────────────────────
+// ── Convert AudioBuffer → WAV blob (16-bit PCM, mono, 16 kHz) ────────────────
 function audioBufferToWav(buffer) {
   const numChannels = 1;
   const sampleRate  = buffer.sampleRate;
   const samples     = buffer.getChannelData(0);
-  const dataLength  = samples.length * 2;
+  const dataLength  = samples.length * 2;         // 16-bit = 2 bytes/sample
   const arrayBuf    = new ArrayBuffer(44 + dataLength);
   const view        = new DataView(arrayBuf);
 
@@ -277,17 +283,20 @@ function audioBufferToWav(buffer) {
     for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i));
   };
 
-  writeStr(0, 'RIFF');
-  view.setUint32(4,  36 + dataLength, true);
-  writeStr(8, 'WAVE');
+  // RIFF header
+  writeStr(0,  'RIFF');
+  view.setUint32(4,  36 + dataLength, true);   // file size - 8
+  writeStr(8,  'WAVE');
+  // fmt chunk
   writeStr(12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1,  true);
-  view.setUint16(22, numChannels, true);
-  view.setUint32(24, sampleRate,  true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2,  true);
-  view.setUint16(34, 16, true);
+  view.setUint32(16, 16,           true);   // chunk size
+  view.setUint16(20, 1,            true);   // PCM format
+  view.setUint16(22, numChannels,  true);
+  view.setUint32(24, sampleRate,   true);
+  view.setUint32(28, sampleRate * 2, true); // byte rate
+  view.setUint16(32, 2,            true);   // block align
+  view.setUint16(34, 16,           true);   // bits per sample
+  // data chunk
   writeStr(36, 'data');
   view.setUint32(40, dataLength, true);
 
