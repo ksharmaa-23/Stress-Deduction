@@ -33,17 +33,18 @@ def train_physiological_model():
         X = df[feature_cols]
         y = (df['stress_level'] >= 2).astype(int)
     else:
+        print("Training physiological model on synthetic data...")
         np.random.seed(42)
         n = 4000
         X = pd.DataFrame({
-            'sr': np.random.uniform(0, 100, n),
-            'rr': np.random.uniform(10, 30, n),
-            't':  np.random.uniform(95, 103, n),
-            'lm': np.random.uniform(0, 20, n),
-            'bo': np.random.uniform(85, 100, n),
+            'sr':  np.random.uniform(0, 100, n),
+            'rr':  np.random.uniform(10, 30, n),
+            't':   np.random.uniform(95, 103, n),
+            'lm':  np.random.uniform(0, 20, n),
+            'bo':  np.random.uniform(85, 100, n),
             'rem': np.random.uniform(0, 25, n),
-            'hr': np.random.uniform(45, 120, n),
-            'sl': np.random.uniform(0.5, 10, n),
+            'hr':  np.random.uniform(45, 120, n),
+            'sl':  np.random.uniform(0.5, 10, n),
         })
         rule = ((X['sr'] > 70).astype(int) + (X['t'] > 99).astype(int) +
                 (X['sl'] < 5).astype(int) + (X['hr'] > 100).astype(int))
@@ -103,12 +104,12 @@ print(f"[INFO] Voice model: {'ENABLED' if VOICE_ENABLED else 'DISABLED'}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. AUDIO READING
+# 3. AUDIO READING  (robust multi-method)
 # ─────────────────────────────────────────────────────────────────────────────
 def read_audio_bytes(audio_bytes):
-    """Try multiple methods to read audio bytes into numpy array."""
-    
-    # Method 1: Python built-in wave module (for proper WAV files)
+    """Try multiple methods to read audio bytes → (samples_float32, sample_rate)."""
+
+    # Method 1: Python built-in wave (standard PCM WAV)
     try:
         buf = io.BytesIO(audio_bytes)
         with wave.open(buf, 'rb') as wf:
@@ -117,64 +118,81 @@ def read_audio_bytes(audio_bytes):
             framerate  = wf.getframerate()
             n_frames   = wf.getnframes()
             raw        = wf.readframes(n_frames)
-        
+
         if sampwidth == 2:
             samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
         elif sampwidth == 4:
             samples = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
         else:
             samples = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) / 128.0 - 1.0
-        
+
         if n_channels > 1:
             samples = samples.reshape(-1, n_channels).mean(axis=1)
-        
-        print(f"[DEBUG] wave module: {len(samples)} samples at {framerate}Hz")
-        return samples, framerate
+
+        if len(samples) > 0:
+            print(f"[DEBUG] wave: {len(samples)} samples @ {framerate} Hz")
+            return samples, framerate
     except Exception as e:
         print(f"[DEBUG] wave failed: {e}")
 
-    # Method 2: Parse WAV manually (handles non-standard WAV from AudioContext)
+    # Method 2: Manual WAV chunk parser (handles quirky AudioContext output)
     try:
         data = audio_bytes
-        # Find 'data' chunk
-        idx = data.find(b'data')
         fmt_idx = data.find(b'fmt ')
-        
-        if idx > 0 and fmt_idx > 0:
-            # Parse fmt chunk
-            fmt_data = data[fmt_idx+8:fmt_idx+24]
+        data_idx = data.find(b'data')
+        if fmt_idx >= 0 and data_idx >= 0:
+            fmt_data = data[fmt_idx + 8: fmt_idx + 24]
             audio_format, n_ch, sample_rate, _, _, bits = struct.unpack('<HHIIHH', fmt_data)
-            
-            # Get audio data
-            data_size = struct.unpack('<I', data[idx+4:idx+8])[0]
-            audio_data = data[idx+8:idx+8+data_size]
-            
+            data_size  = struct.unpack('<I', data[data_idx + 4: data_idx + 8])[0]
+            audio_data = data[data_idx + 8: data_idx + 8 + data_size]
+
             if bits == 16:
                 samples = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
             elif bits == 32:
-                samples = np.frombuffer(audio_data, dtype=np.int32).astype(np.float32) / 2147483648.0
+                # Could be float32 or int32
+                try:
+                    samples = np.frombuffer(audio_data, dtype=np.float32)
+                    if np.max(np.abs(samples)) > 1.5:   # looks like int32
+                        samples = np.frombuffer(audio_data, dtype=np.int32).astype(np.float32) / 2147483648.0
+                except Exception:
+                    samples = np.frombuffer(audio_data, dtype=np.int32).astype(np.float32) / 2147483648.0
             else:
-                samples = np.frombuffer(audio_data, dtype=np.float32)
-            
+                samples = np.frombuffer(audio_data, dtype=np.uint8).astype(np.float32) / 128.0 - 1.0
+
             if n_ch > 1:
                 samples = samples.reshape(-1, n_ch).mean(axis=1)
-            
-            print(f"[DEBUG] manual WAV parse: {len(samples)} samples at {sample_rate}Hz")
-            return samples, sample_rate
+
+            if len(samples) > 0:
+                print(f"[DEBUG] manual WAV: {len(samples)} samples @ {sample_rate} Hz")
+                return samples, sample_rate
     except Exception as e:
         print(f"[DEBUG] manual WAV parse failed: {e}")
 
-    # Method 3: Try soundfile
+    # Method 3: soundfile (handles webm/ogg/flac if libsndfile supports it)
     try:
         import soundfile as sf
         buf = io.BytesIO(audio_bytes)
         samples, sr = sf.read(buf, dtype='float32')
         if len(samples.shape) > 1:
             samples = samples.mean(axis=1)
-        print(f"[DEBUG] soundfile: {len(samples)} samples at {sr}Hz")
-        return samples, sr
+        if len(samples) > 0:
+            print(f"[DEBUG] soundfile: {len(samples)} samples @ {sr} Hz")
+            return samples, sr
     except Exception as e:
         print(f"[DEBUG] soundfile failed: {e}")
+
+    # Method 4: pydub (handles webm/opus if ffmpeg is present)
+    try:
+        from pydub import AudioSegment
+        buf = io.BytesIO(audio_bytes)
+        seg = AudioSegment.from_file(buf)
+        seg = seg.set_channels(1).set_frame_rate(16000).set_sample_width(2)
+        raw = np.array(seg.get_array_of_samples(), dtype=np.int16)
+        samples = raw.astype(np.float32) / 32768.0
+        print(f"[DEBUG] pydub: {len(samples)} samples @ 16000 Hz")
+        return samples, 16000
+    except Exception as e:
+        print(f"[DEBUG] pydub failed: {e}")
 
     print("[WARN] All audio reading methods failed")
     return None, None
@@ -182,20 +200,20 @@ def read_audio_bytes(audio_bytes):
 
 def extract_audio_features(audio_bytes):
     y, sr = read_audio_bytes(audio_bytes)
-    
+
     if y is None or len(y) < 100:
         return None
-    
+
     sr = sr or 16000
     frame_size = min(512, max(64, len(y) // 8))
-    hop = frame_size // 2
-    frames = [y[i:i+frame_size] for i in range(0, len(y)-frame_size, hop)]
-    
+    hop    = frame_size // 2
+    frames = [y[i: i + frame_size] for i in range(0, len(y) - frame_size, hop)]
+
     if not frames:
         return None
 
     # RMS energy
-    rms_vals = np.array([np.sqrt(np.mean(f**2) + 1e-10) for f in frames])
+    rms_vals = np.array([np.sqrt(np.mean(f ** 2) + 1e-10) for f in frames])
     rms_cv   = float(np.std(rms_vals) / (np.mean(rms_vals) + 1e-9))
 
     # ZCR
@@ -206,17 +224,17 @@ def extract_audio_features(audio_bytes):
     sc_vals = []
     for f in frames:
         spec  = np.abs(np.fft.rfft(f))
-        freqs = np.fft.rfftfreq(len(f), 1.0/sr)
+        freqs = np.fft.rfftfreq(len(f), 1.0 / sr)
         sc_vals.append(float(np.sum(freqs * spec) / (np.sum(spec) + 1e-9)))
     spectral_centroid_mean = float(np.mean(sc_vals))
 
     # Pitch via autocorrelation
-    chunk   = y[:min(len(y), sr)]
-    corr    = np.correlate(chunk, chunk, mode='full')[len(chunk)-1:]
+    chunk   = y[: min(len(y), sr)]
+    corr    = np.correlate(chunk, chunk, mode='full')[len(chunk) - 1:]
     min_lag = max(1, int(sr / 400))
     max_lag = min(len(corr) - 1, int(sr / 70))
     if max_lag > min_lag:
-        peak    = np.argmax(corr[min_lag:max_lag]) + min_lag
+        peak       = np.argmax(corr[min_lag: max_lag]) + min_lag
         pitch_mean = float(sr / peak) if peak > 0 else 150.0
     else:
         pitch_mean = 150.0
@@ -244,15 +262,21 @@ def index():
 def predict_physiological():
     data = request.get_json(force=True)
     try:
+        # Map both long-form and short-form field names to model features
         key_map = {
-            'sr':  ['snoring_range', 'sr'],
+            'sr':  ['snoring_range',    'sr'],
             'rr':  ['respiration_rate', 'rr'],
             't':   ['body_temperature', 't'],
-            'lm':  ['limb_movement', 'lm'],
-            'bo':  ['blood_oxygen', 'bo'],
-            'rem': ['eye_movement', 'rem'],
-            'hr':  ['heart_rate', 'hr'],
-            'sl':  ['hours_sleep', 'sl'],
+            'lm':  ['limb_movement',    'lm'],
+            'bo':  ['blood_oxygen',     'bo'],
+            'rem': ['eye_movement',     'rem'],
+            'hr':  ['heart_rate',       'hr'],
+            'sl':  ['hours_sleep',      'sl'],
+        }
+        # Sensible defaults so prediction is not distorted by missing fields
+        defaults = {
+            'sr': 30, 'rr': 15, 't': 98.6, 'lm': 8,
+            'bo': 97, 'rem': 12, 'hr': 72, 'sl': 7
         }
         row = {}
         for feat in phys_features:
@@ -261,14 +285,17 @@ def predict_physiological():
                 if k in data:
                     val = float(data[k])
                     break
-            row[feat] = val if val is not None else 0.0
+            row[feat] = val if val is not None else defaults.get(feat, 0.0)
 
-        X     = pd.DataFrame([row])[phys_features]
-        pred  = phys_model.predict(X)[0]
-        prob  = float(phys_model.predict_proba(X)[0][pred])
+        X    = pd.DataFrame([row])[phys_features]
+        pred = phys_model.predict(X)[0]
+        prob = float(phys_model.predict_proba(X)[0][pred])
         label = "High" if pred == 1 else "Low"
-        return jsonify({"stress_level": label, "probability": round(prob, 3),
-                        "message": f"Your Stress level is {label}"})
+        return jsonify({
+            "stress_level": label,
+            "probability":  round(prob, 3),
+            "message":      f"Your Stress level is {label}"
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -283,14 +310,18 @@ def predict_voice():
             return jsonify({"error": "No audio file sent"}), 400
 
         audio_bytes = request.files["audio"].read()
-        print(f"[DEBUG] Audio received: {len(audio_bytes)} bytes, first 4: {audio_bytes[:4]}")
+        print(f"[DEBUG] Audio received: {len(audio_bytes)} bytes, header: {audio_bytes[:4]}")
 
         features = extract_audio_features(audio_bytes)
         if features is None:
-            return jsonify({"error": "Could not process audio. Please speak for at least 2 seconds and try again."}), 400
+            return jsonify({
+                "error": "Could not process audio. Please speak for at least 2 seconds and try again."
+            }), 400
 
-        feat_order  = voice_features or ['pitch_mean','pitch_std','rms_cv','zcr_mean',
-                                          'spectral_centroid_mean','mfcc_var_mean','speech_rate']
+        feat_order = voice_features or [
+            'pitch_mean', 'pitch_std', 'rms_cv', 'zcr_mean',
+            'spectral_centroid_mean', 'mfcc_var_mean', 'speech_rate'
+        ]
         feat_vec    = np.array([[features.get(f, 0.0) for f in feat_order]])
         feat_scaled = voice_scaler.transform(feat_vec)
 
@@ -301,20 +332,20 @@ def predict_voice():
         nsp   = float(proba[0]) if len(proba) > 1 else 1 - float(pred)
 
         return jsonify({
-            "prediction"  : label,
+            "prediction":   label,
             "stress_level": label,
-            "confidence"  : {"stressed": round(sp, 4), "not_stressed": round(nsp, 4)},
-            "audio_score" : {"stressed": round(sp, 4), "not_stressed": round(nsp, 4)},
-            "nlp_score"   : {"stressed": None, "not_stressed": None},
+            "confidence":   {"stressed": round(sp, 4), "not_stressed": round(nsp, 4)},
+            "audio_score":  {"stressed": round(sp, 4), "not_stressed": round(nsp, 4)},
+            "nlp_score":    {"stressed": None, "not_stressed": None},
             "acoustic_features": {
-                "pitch_mean_hz"    : round(features.get("pitch_mean", 0), 1),
-                "pitch_std_hz"     : round(features.get("pitch_std", 0), 1),
-                "rms_variability"  : round(features.get("rms_cv", 0), 3),
+                "pitch_mean_hz":     round(features.get("pitch_mean", 0), 1),
+                "pitch_std_hz":      round(features.get("pitch_std", 0), 1),
+                "rms_variability":   round(features.get("rms_cv", 0), 3),
                 "spectral_centroid": round(features.get("spectral_centroid_mean", 0), 1),
-                "zcr_mean"         : round(features.get("zcr_mean", 0), 5),
-                "mfcc_variance"    : round(features.get("mfcc_var_mean", 0), 2),
+                "zcr_mean":          round(features.get("zcr_mean", 0), 5),
+                "mfcc_variance":     round(features.get("mfcc_var_mean", 0), 2),
             },
-            "method" : "csv_voice_model",
+            "method":  "csv_voice_model",
             "message": f"Voice Analysis: {label}"
         })
     except Exception as e:
