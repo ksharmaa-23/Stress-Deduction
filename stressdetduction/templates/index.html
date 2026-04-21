@@ -2,52 +2,152 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Stress Detection</title>
+  <title>Smart Stress Detection</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-
-  <!-- Correct Flask static path -->
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-
 <body>
   <div class="container">
+
+    <!-- LEFT PANEL -->
     <div class="left-panel">
-      <h2>About the Project</h2>
+      <div class="badge">🧠 AI Health</div>
+      <h1>Smart<br>Stress<br>Detection</h1>
       <p>
-        Considering today's lifestyle, people often forget the benefits of sleep.
-        Smart-Yoga Pillow (SaYoPillow) helps relate stress and sleep. 
-        An edge device analyzes physiological changes during sleep to predict stress for the next day.
+        The <span class="highlight">SaYoPillow</span> system analyzes physiological
+        signals during sleep to predict next-day stress levels — helping you take
+        control of your wellbeing.
       </p>
-      <p class="credit">The Project is made by Khushi Sharma</p>
+      <p>
+        Use <span class="highlight">Physiological</span> inputs or record your
+        <span class="highlight">Voice</span> for an AI-powered stress analysis.
+      </p>
+      <ul class="feature-list">
+        <li>📊 Sleep &amp; vitals analysis</li>
+        <li>🎙️ Voice stress detection</li>
+        <li>⚡ Real-time AI prediction</li>
+      </ul>
     </div>
 
+    <!-- RIGHT PANEL -->
     <div class="right-panel">
-      <div class="logo">
-        <div class="brain">🧠</div>
-        <h1>Stress <span class="bold">Detection</span></h1>
+      <div class="card-header">
+        <div class="brain-icon">🧠</div>
+        <div>
+          <h2>Stress Detection</h2>
+          <p class="subtitle">Choose your analysis method</p>
+        </div>
       </div>
 
-      <div class="form">
-        <label>Snoring range:</label>
-        <input id="snoring" placeholder="Range between 0 and 100" />
-
-        <label>Body Temperature:</label>
-        <input id="temp" placeholder="Fahrenheit e.g. 98.6" />
-
-        <label>Hours of Sleep:</label>
-        <input id="hours" placeholder="In hours e.g. 6" />
-
-        <label>Heart rate:</label>
-        <input id="hr" placeholder="Range between 45 and 220" />
-
-        <button id="predictBtn">Predict</button>
-
-        <div id="result" class="result"></div>
+      <!-- TABS -->
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="physio">📊 Physiological</button>
+        <button class="tab-btn" data-tab="voice">🎙️ Voice</button>
       </div>
-    </div>
-  </div>
 
-  <!-- Correct Flask static script path -->
+      <!-- PHYSIOLOGICAL TAB -->
+      <div id="tab-physio" class="tab-content active">
+        <div class="form-grid">
+
+          <div class="form-group">
+            <label>Snoring Range <span class="hint">(0 – 100)</span></label>
+            <input id="snoring" type="number" placeholder="e.g. 45" min="0" max="100"/>
+          </div>
+
+          <div class="form-group">
+            <label>Respiration Rate <span class="hint">(breaths/min)</span></label>
+            <input id="rr" type="number" placeholder="e.g. 15" min="0" max="40"/>
+          </div>
+
+          <div class="form-group">
+            <label>Body Temperature <span class="hint">(°F)</span></label>
+            <input id="temp" type="number" placeholder="e.g. 98.6" min="90" max="110" step="0.1"/>
+          </div>
+
+          <div class="form-group">
+            <label>Limb Movement <span class="hint">(0 – 30)</span></label>
+            <input id="lm" type="number" placeholder="e.g. 8" min="0" max="30"/>
+          </div>
+
+          <div class="form-group">
+            <label>Blood Oxygen <span class="hint">(%)</span></label>
+            <input id="bo" type="number" placeholder="e.g. 97" min="80" max="100"/>
+          </div>
+
+          <div class="form-group">
+            <label>Eye Movement <span class="hint">(REM, 0 – 30)</span></label>
+            <input id="rem" type="number" placeholder="e.g. 12" min="0" max="30"/>
+          </div>
+
+          <div class="form-group">
+            <label>Hours of Sleep <span class="hint">(hrs)</span></label>
+            <input id="hours" type="number" placeholder="e.g. 6" min="0" max="12" step="0.5"/>
+          </div>
+
+          <div class="form-group">
+            <label>Heart Rate <span class="hint">(BPM)</span></label>
+            <input id="hr" type="number" placeholder="e.g. 72" min="40" max="220"/>
+          </div>
+
+        </div>
+
+        <button id="predictBtn" class="btn-primary">Analyze Stress →</button>
+        <div id="result" class="result-box"></div>
+      </div>
+
+      <!-- VOICE TAB -->
+      <div id="tab-voice" class="tab-content">
+        <p class="voice-hint">Speak naturally for 5–10 seconds. The AI will analyze your stress level from your voice patterns.</p>
+
+        <button id="recordBtn" class="btn-record">
+          <span class="rec-icon">🎙️</span>
+          <span id="recordLabel">Start Recording</span>
+        </button>
+        <div id="recordTimer" class="hidden timer">
+          Recording… <span id="timerCount">0</span>s
+        </div>
+
+        <div id="audioPlayback" class="hidden">
+          <audio id="audioPlayer" controls></audio>
+        </div>
+
+        <div id="transcriptBox" class="hidden">
+          <label>TRANSCRIPT (AUTO-DETECTED):</label>
+          <textarea id="transcriptText" placeholder="Transcript will appear here..."></textarea>
+        </div>
+
+        <button id="analyzeBtn" class="btn-primary hidden">🔍 Analyze Voice</button>
+        <div id="voiceResult" class="result-box"></div>
+
+        <div id="voiceDetails" class="hidden voice-details">
+          <div class="detail-row">
+            <span>Audio Score (Acoustic)</span>
+            <span id="audioScore">—</span>
+          </div>
+          <div class="detail-row">
+            <span>NLP Score (Text)</span>
+            <span id="nlpScore">N/A</span>
+          </div>
+          <div class="detail-row">
+            <span>Method</span>
+            <span id="methodLabel">—</span>
+          </div>
+
+          <div id="acousticBreakdown" class="hidden">
+            <p class="breakdown-title">⬇ ACOUSTIC FEATURE BREAKDOWN</p>
+            <div class="detail-row"><span>Pitch Mean</span><span id="featPitchMean">—</span></div>
+            <div class="detail-row"><span>Pitch Std</span><span id="featPitchStd">—</span></div>
+            <div class="detail-row"><span>RMS Variability</span><span id="featRmsCv">—</span></div>
+            <div class="detail-row"><span>Spectral Centroid</span><span id="featSpectral">—</span></div>
+            <div class="detail-row"><span>Tempo</span><span id="featTempo">—</span></div>
+            <div class="detail-row"><span>MFCC Variance</span><span id="featMfcc">—</span></div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- end right-panel -->
+  </div><!-- end container -->
+
   <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
 </html>
