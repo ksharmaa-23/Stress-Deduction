@@ -17,7 +17,14 @@ document.getElementById("predictBtn").addEventListener("click", async () => {
   const hr      = document.getElementById("hr").value;
 
   const payload = {
-    snoring_range    : Number(snoring),
+    snoring_range: Number(snoring),
+    respiration_rate : Number(document.getElementById("rr")?.value || 15),
+    body_temperature : Number(temp),
+    limb_movement    : Number(document.getElementById("lm")?.value || 8),
+    blood_oxygen     : Number(document.getElementById("bo")?.value || 97),
+    eye_movement     : Number(document.getElementById("rem")?.value || 12),
+    hours_sleep      : Number(hours),
+    heart_rate       : Number(hr,
     body_temperature : Number(temp),
     hours_sleep      : Number(hours),
     heart_rate       : Number(hr)
