@@ -10,17 +10,7 @@ from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import StandardScaler
 import joblib
 
-<<<<<<< HEAD
-# ── FFMPEG PATH (Windows) ────────────────────────────────────────────────────
-result = subprocess.run(
-    ["ffmpeg", "-y", "-i", tmp_path, "-ar", str(sr), wav_path],
-    stdout=subprocess.PIPE, stderr=subprocess.PIPE
-)
-# ── Optional voice/audio imports ─────────────────────────────────────────────
-=======
->>>>>>> 7d5fcea3d1e963f57f9b32267cfbcf69b04303f5
 try:
-    import pickle
     import soundfile as sf
     VOICE_LIBS_AVAILABLE = True
 except ImportError:
@@ -34,33 +24,28 @@ app = Flask(__name__, static_folder="static", template_folder="templates")
 CORS(app)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. PHYSIOLOGICAL MODEL — trained from SaYoPillow.csv
-# ─────────────────────────────────────────────────────────────────────────────
 def train_physiological_model():
     csv_path = "SaYoPillow.csv"
     if os.path.exists(csv_path):
         print("[INFO] Training physiological model from CSV...")
         df = pd.read_csv(csv_path)
         df.columns = df.columns.str.strip()
-        # Features: sr=snoring, rr=respiration, t=temp, lm=limb movement,
-        #           bo=blood oxygen, rem=eye movement, hr=heart rate, sl=sleep hours
         feature_cols = [c for c in df.columns if c != 'stress_level']
         X = df[feature_cols]
-        y = (df['stress_level'] >= 2).astype(int)  # 0-1=low, 2-4=high
+        y = (df['stress_level'] >= 2).astype(int)
     else:
         print("[INFO] CSV not found, using synthetic data...")
         np.random.seed(42)
         n = 4000
         X = pd.DataFrame({
-            'sr': np.random.uniform(0, 100, n),
-            'rr': np.random.uniform(10, 30, n),
-            't':  np.random.uniform(95, 103, n),
-            'lm': np.random.uniform(0, 20, n),
-            'bo': np.random.uniform(85, 100, n),
+            'sr':  np.random.uniform(0, 100, n),
+            'rr':  np.random.uniform(10, 30, n),
+            't':   np.random.uniform(95, 103, n),
+            'lm':  np.random.uniform(0, 20, n),
+            'bo':  np.random.uniform(85, 100, n),
             'rem': np.random.uniform(0, 25, n),
-            'hr': np.random.uniform(45, 120, n),
-            'sl': np.random.uniform(0.5, 10, n),
+            'hr':  np.random.uniform(45, 120, n),
+            'sl':  np.random.uniform(0.5, 10, n),
         })
         rule = ((X['sr'] > 70).astype(int) + (X['t'] > 99).astype(int) +
                 (X['sl'] < 5).astype(int) + (X['hr'] > 100).astype(int))
@@ -74,18 +59,17 @@ def train_physiological_model():
     joblib.dump({'model': clf, 'features': list(X.columns)}, MODEL_PATH)
     return clf, list(X.columns)
 
+
 def load_physiological_model():
     if os.path.exists(MODEL_PATH):
         data = joblib.load(MODEL_PATH)
         return data['model'], data['features']
     return train_physiological_model()
 
+
 phys_model, phys_features = load_physiological_model()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. VOICE MODEL — trained from voice_dataset.csv
-# ─────────────────────────────────────────────────────────────────────────────
 def train_voice_model():
     csv_path = "voice_dataset.csv"
     if os.path.exists(csv_path):
@@ -107,6 +91,7 @@ def train_voice_model():
         return clf, scaler, list(feature_cols)
     return None, None, None
 
+
 def load_voice_model():
     if os.path.exists(VOICE_MODEL_PATH) and os.path.exists(SCALER_PATH):
         clf = joblib.load(VOICE_MODEL_PATH)
@@ -114,14 +99,12 @@ def load_voice_model():
         return clf, data['scaler'], data['features']
     return train_voice_model()
 
+
 voice_model, voice_scaler, voice_features = load_voice_model()
 VOICE_ENABLED = VOICE_LIBS_AVAILABLE and voice_model is not None
 print(f"[INFO] Voice model: {'ENABLED' if VOICE_ENABLED else 'DISABLED'}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. AUDIO FEATURE EXTRACTION (lightweight, no librosa)
-# ─────────────────────────────────────────────────────────────────────────────
 def extract_audio_features(audio_bytes):
     try:
         audio_io = io.BytesIO(audio_bytes)
@@ -140,25 +123,21 @@ def extract_audio_features(audio_bytes):
     if not frames:
         return None
 
-    # RMS
     rms_vals = np.array([np.sqrt(np.mean(f**2)) for f in frames])
     rms_cv = float(np.std(rms_vals) / (np.mean(rms_vals) + 1e-9))
 
-    # ZCR
     zcr_mean = float(np.mean([
         np.sum(np.abs(np.diff(np.sign(f)))) / (2 * frame_size)
         for f in frames
     ]))
 
-    # Spectral centroid
     sc_vals = []
     for f in frames:
         spec  = np.abs(np.fft.rfft(f))
-        freqs = np.fft.rfftfreq(frame_size, 1.0/sr)
+        freqs = np.fft.rfftfreq(frame_size, 1.0 / sr)
         sc_vals.append(np.sum(freqs * spec) / (np.sum(spec) + 1e-9))
     spectral_centroid_mean = float(np.mean(sc_vals))
 
-    # Pitch via autocorrelation
     chunk   = y[:min(len(y), sr)]
     corr    = np.correlate(chunk, chunk, mode='full')[len(chunk)-1:]
     min_lag = int(sr / 400)
@@ -169,24 +148,21 @@ def extract_audio_features(audio_bytes):
     else:
         pitch_mean = 150.0
 
-    pitch_std    = rms_cv * 30
-    mfcc_var     = float(np.var(y) * 1000)
-    speech_rate  = zcr_mean
+    pitch_std   = rms_cv * 30
+    mfcc_var    = float(np.var(y) * 1000)
+    speech_rate = zcr_mean
 
     return {
-        'pitch_mean':              pitch_mean,
-        'pitch_std':               pitch_std,
-        'rms_cv':                  rms_cv,
-        'zcr_mean':                zcr_mean,
-        'spectral_centroid_mean':  spectral_centroid_mean,
-        'mfcc_var_mean':           mfcc_var,
-        'speech_rate':             speech_rate,
+        'pitch_mean':             pitch_mean,
+        'pitch_std':              pitch_std,
+        'rms_cv':                 rms_cv,
+        'zcr_mean':               zcr_mean,
+        'spectral_centroid_mean': spectral_centroid_mean,
+        'mfcc_var_mean':          mfcc_var,
+        'speech_rate':            speech_rate,
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. ROUTES
-# ─────────────────────────────────────────────────────────────────────────────
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -196,18 +172,17 @@ def index():
 def predict_physiological():
     data = request.get_json(force=True)
     try:
-        # Accept both old keys and CSV column names
-        row = {}
         key_map = {
-            'sr': ['snoring_range', 'sr'],
-            'rr': ['respiration_rate', 'rr'],
-            't':  ['body_temperature', 't'],
-            'lm': ['limb_movement', 'lm'],
-            'bo': ['blood_oxygen', 'bo'],
-            'rem':['eye_movement', 'rem'],
-            'hr': ['heart_rate', 'hr'],
-            'sl': ['hours_sleep', 'sl'],
+            'sr':  ['snoring_range', 'sr'],
+            'rr':  ['respiration_rate', 'rr'],
+            't':   ['body_temperature', 't'],
+            'lm':  ['limb_movement', 'lm'],
+            'bo':  ['blood_oxygen', 'bo'],
+            'rem': ['eye_movement', 'rem'],
+            'hr':  ['heart_rate', 'hr'],
+            'sl':  ['hours_sleep', 'sl'],
         }
+        row = {}
         for feat in phys_features:
             val = None
             if feat in key_map:
@@ -223,8 +198,11 @@ def predict_physiological():
         pred  = phys_model.predict(X)[0]
         prob  = float(phys_model.predict_proba(X)[0][pred])
         label = "High" if pred == 1 else "Low"
-        return jsonify({"stress_level": label, "probability": round(prob, 3),
-                        "message": f"Your Stress level is {label}"})
+        return jsonify({
+            "stress_level": label,
+            "probability":  round(prob, 3),
+            "message":      f"Your Stress level is {label}"
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -244,12 +222,11 @@ def predict_voice():
         if features is None:
             return jsonify({"error": "Could not process audio. Please try again."}), 400
 
-        # Build feature vector in same order as training
         feat_order = voice_features if voice_features else [
-            'pitch_mean','pitch_std','rms_cv','zcr_mean',
-            'spectral_centroid_mean','mfcc_var_mean','speech_rate'
+            'pitch_mean', 'pitch_std', 'rms_cv', 'zcr_mean',
+            'spectral_centroid_mean', 'mfcc_var_mean', 'speech_rate'
         ]
-        feat_vec = np.array([[features.get(f, 0.0) for f in feat_order]])
+        feat_vec    = np.array([[features.get(f, 0.0) for f in feat_order]])
         feat_scaled = voice_scaler.transform(feat_vec)
 
         pred  = voice_model.predict(feat_scaled)[0]
@@ -260,26 +237,26 @@ def predict_voice():
         not_stressed_prob = float(proba[0]) if len(proba) > 1 else 1 - float(pred)
 
         return jsonify({
-            "prediction"  : label,
+            "prediction":   label,
             "stress_level": label,
-            "confidence"  : {
+            "confidence": {
                 "stressed":     round(stressed_prob, 4),
                 "not_stressed": round(not_stressed_prob, 4)
             },
-            "audio_score" : {
+            "audio_score": {
                 "stressed":     round(stressed_prob, 4),
                 "not_stressed": round(not_stressed_prob, 4)
             },
-            "nlp_score"   : {"stressed": None, "not_stressed": None},
+            "nlp_score": {"stressed": None, "not_stressed": None},
             "acoustic_features": {
-                "pitch_mean_hz"    : round(features.get("pitch_mean", 0), 1),
-                "pitch_std_hz"     : round(features.get("pitch_std", 0), 1),
-                "rms_variability"  : round(features.get("rms_cv", 0), 3),
+                "pitch_mean_hz":     round(features.get("pitch_mean", 0), 1),
+                "pitch_std_hz":      round(features.get("pitch_std", 0), 1),
+                "rms_variability":   round(features.get("rms_cv", 0), 3),
                 "spectral_centroid": round(features.get("spectral_centroid_mean", 0), 1),
-                "zcr_mean"         : round(features.get("zcr_mean", 0), 5),
-                "mfcc_variance"    : round(features.get("mfcc_var_mean", 0), 2),
+                "zcr_mean":          round(features.get("zcr_mean", 0), 5),
+                "mfcc_variance":     round(features.get("mfcc_var_mean", 0), 2),
             },
-            "method" : "csv_voice_model",
+            "method":  "csv_voice_model",
             "message": f"Voice Analysis: {label}"
         })
     except ValueError as ve:
