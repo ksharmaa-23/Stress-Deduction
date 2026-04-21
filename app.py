@@ -1,316 +1,182 @@
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 import os
-import subprocess
+import io
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
+from sklearn.preprocessing import StandardScaler
 import joblib
 
-# ── FFMPEG PATH (Windows) ────────────────────────────────────────────────────
-FFMPEG  = "ffmpeg"
-FFPROBE = "ffprobe"
-# ── Optional voice/audio imports ─────────────────────────────────────────────
 try:
     import pickle
-    import librosa
-    import librosa.feature
+    import soundfile as sf
     VOICE_LIBS_AVAILABLE = True
 except ImportError:
     VOICE_LIBS_AVAILABLE = False
-    print("[WARN] Voice libraries not installed. Voice prediction disabled.")
 
-# PyTorch is optional now — we don't use the CNN anymore
-try:
-    import torch
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
-
-MODEL_PATH      = "model.joblib"
-NLP_MODEL_PATH  = "nlp_model.pkl"
-VECTORIZER_PATH = "vectorizer.pkl"
+MODEL_PATH       = "model.joblib"
+VOICE_MODEL_PATH = "voice_model.joblib"
+SCALER_PATH      = "voice_scaler.joblib"
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 CORS(app)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1.  PHYSIOLOGICAL MODEL
+# 1. PHYSIOLOGICAL MODEL — trained from SaYoPillow.csv
 # ─────────────────────────────────────────────────────────────────────────────
-def generate_synthetic_data(n=4000, random_state=42):
-    np.random.seed(random_state)
-    snoring     = np.random.uniform(0, 100, n)
-    body_temp   = np.random.uniform(95, 103, n)
-    hours_sleep = np.random.uniform(0.5, 10, n)
-    hr          = np.random.uniform(45, 220, n)
-    rule = (
-        (snoring > 70).astype(int) +
-        (body_temp > 99).astype(int) +
-        (hours_sleep < 5).astype(int) +
-        (hr > 100).astype(int)
-    )
-    label = (rule >= 2).astype(int)
-    return pd.DataFrame({
-        "snoring_range": snoring, "body_temperature": body_temp,
-        "hours_sleep": hours_sleep, "heart_rate": hr, "stress": label
-    })
+def train_physiological_model():
+    csv_path = "SaYoPillow.csv"
+    if os.path.exists(csv_path):
+        print("[INFO] Training physiological model from CSV...")
+        df = pd.read_csv(csv_path)
+        df.columns = df.columns.str.strip()
+        # Features: sr=snoring, rr=respiration, t=temp, lm=limb movement,
+        #           bo=blood oxygen, rem=eye movement, hr=heart rate, sl=sleep hours
+        feature_cols = [c for c in df.columns if c != 'stress_level']
+        X = df[feature_cols]
+        y = (df['stress_level'] >= 2).astype(int)  # 0-1=low, 2-4=high
+    else:
+        print("[INFO] CSV not found, using synthetic data...")
+        np.random.seed(42)
+        n = 4000
+        X = pd.DataFrame({
+            'sr': np.random.uniform(0, 100, n),
+            'rr': np.random.uniform(10, 30, n),
+            't':  np.random.uniform(95, 103, n),
+            'lm': np.random.uniform(0, 20, n),
+            'bo': np.random.uniform(85, 100, n),
+            'rem': np.random.uniform(0, 25, n),
+            'hr': np.random.uniform(45, 120, n),
+            'sl': np.random.uniform(0.5, 10, n),
+        })
+        rule = ((X['sr'] > 70).astype(int) + (X['t'] > 99).astype(int) +
+                (X['sl'] < 5).astype(int) + (X['hr'] > 100).astype(int))
+        y = (rule >= 2).astype(int)
 
-def train_and_save_model(path=MODEL_PATH):
-    print("Training physiological model on synthetic data...")
-    df = generate_synthetic_data()
-    X  = df[["snoring_range", "body_temperature", "hours_sleep", "heart_rate"]]
-    y  = df["stress"]
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    clf = RandomForestClassifier(n_estimators=150, random_state=42)
+    clf = RandomForestClassifier(n_estimators=100, random_state=42)
     clf.fit(X_train, y_train)
     acc = accuracy_score(y_test, clf.predict(X_test))
-    print(f"Physiological model trained. Accuracy: {acc:.3f}")
-    joblib.dump(clf, path)
-    return clf
+    print(f"[INFO] Physiological model accuracy: {acc:.3f}")
+    joblib.dump({'model': clf, 'features': list(X.columns)}, MODEL_PATH)
+    return clf, list(X.columns)
 
-def load_rf_model():
+def load_physiological_model():
     if os.path.exists(MODEL_PATH):
-        print("Loading existing physiological model...")
-        return joblib.load(MODEL_PATH)
-    return train_and_save_model()
+        data = joblib.load(MODEL_PATH)
+        return data['model'], data['features']
+    return train_physiological_model()
 
-rf_model = load_rf_model()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2.  NLP MODEL (text only, CNN removed)
-# ─────────────────────────────────────────────────────────────────────────────
-nlp_model  = None
-vectorizer = None
-
-if VOICE_LIBS_AVAILABLE:
-    if os.path.exists(VECTORIZER_PATH) and os.path.exists(NLP_MODEL_PATH):
-        try:
-            vectorizer = pickle.load(open(VECTORIZER_PATH, "rb"))
-            nlp_model  = pickle.load(open(NLP_MODEL_PATH, "rb"))
-            print("[OK] NLP text model loaded.")
-        except Exception as e:
-            print(f"[WARN] Could not load NLP model: {e}")
-
-VOICE_ENABLED = VOICE_LIBS_AVAILABLE
-print(f"[INFO] Voice prediction: {'ENABLED (audio features)' if VOICE_ENABLED else 'DISABLED'}")
+phys_model, phys_features = load_physiological_model()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3.  AUDIO-FEATURE-BASED STRESS DETECTION  (replaces CNN)
-#     Uses real acoustic correlates of stress from speech science:
-#     - Pitch (F0): stressed speech has higher & more variable pitch
-#     - Energy (RMS): stressed speech is louder with more variation
-#     - Speaking rate (ZCR proxy): faster/irregular in stress
-#     - Spectral centroid: higher in stressed speech (more high freq energy)
-#     - MFCCs variance: more variable under stress
+# 2. VOICE MODEL — trained from voice_dataset.csv
 # ─────────────────────────────────────────────────────────────────────────────
-def extract_audio_features(audio_bytes, sr=16000):
-    import tempfile, uuid
+def train_voice_model():
+    csv_path = "voice_dataset.csv"
+    if os.path.exists(csv_path):
+        print("[INFO] Training voice model from CSV...")
+        df = pd.read_csv(csv_path)
+        df.columns = df.columns.str.strip()
+        feature_cols = [c for c in df.columns if c != 'stress_label']
+        X = df[feature_cols].values
+        y = df['stress_label'].values
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
+        clf = RandomForestClassifier(n_estimators=100, random_state=42)
+        clf.fit(X_train, y_train)
+        acc = accuracy_score(y_test, clf.predict(X_test))
+        print(f"[INFO] Voice model accuracy: {acc:.3f}")
+        joblib.dump(clf, VOICE_MODEL_PATH)
+        joblib.dump({'scaler': scaler, 'features': list(feature_cols)}, SCALER_PATH)
+        return clf, scaler, list(feature_cols)
+    return None, None, None
 
-    tmp_path = os.path.join(tempfile.gettempdir(), f"stress_{uuid.uuid4().hex}.webm")
-    wav_path = tmp_path.replace('.webm', '.wav')
+def load_voice_model():
+    if os.path.exists(VOICE_MODEL_PATH) and os.path.exists(SCALER_PATH):
+        clf = joblib.load(VOICE_MODEL_PATH)
+        data = joblib.load(SCALER_PATH)
+        return clf, data['scaler'], data['features']
+    return train_voice_model()
 
+voice_model, voice_scaler, voice_features = load_voice_model()
+VOICE_ENABLED = VOICE_LIBS_AVAILABLE and voice_model is not None
+print(f"[INFO] Voice model: {'ENABLED' if VOICE_ENABLED else 'DISABLED'}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. AUDIO FEATURE EXTRACTION (lightweight, no librosa)
+# ─────────────────────────────────────────────────────────────────────────────
+def extract_audio_features(audio_bytes):
     try:
-        with open(tmp_path, 'wb') as f:
-            f.write(audio_bytes)
+        audio_io = io.BytesIO(audio_bytes)
+        y, sr = sf.read(audio_io, dtype='float32')
+        if len(y.shape) > 1:
+            y = y.mean(axis=1)
+    except Exception as e:
+        print(f"[WARN] Audio read error: {e}")
+        return None
 
-        result = subprocess.run(
-            [FFMPEG, "-y", "-i", tmp_path, "-ar", str(sr), wav_path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg error: {result.stderr.decode()}")
+    if len(y) < 1000:
+        raise ValueError("Audio too short. Please speak for at least 1 second.")
 
-        y, _ = librosa.load(wav_path, sr=sr)
+    frame_size = 512
+    frames = [y[i:i+frame_size] for i in range(0, len(y)-frame_size, frame_size//2)]
+    if not frames:
+        return None
 
-    finally:
-        for p in [tmp_path, wav_path]:
-            try:
-                if os.path.exists(p):
-                    os.remove(p)
-            except:
-                pass
+    # RMS
+    rms_vals = np.array([np.sqrt(np.mean(f**2)) for f in frames])
+    rms_cv = float(np.std(rms_vals) / (np.mean(rms_vals) + 1e-9))
 
-    if len(y) < sr * 0.3:
-        raise ValueError("Audio too short (< 0.3 seconds). Please speak longer.")
+    # ZCR
+    zcr_mean = float(np.mean([
+        np.sum(np.abs(np.diff(np.sign(f)))) / (2 * frame_size)
+        for f in frames
+    ]))
 
-    features = {}
+    # Spectral centroid
+    sc_vals = []
+    for f in frames:
+        spec  = np.abs(np.fft.rfft(f))
+        freqs = np.fft.rfftfreq(frame_size, 1.0/sr)
+        sc_vals.append(np.sum(freqs * spec) / (np.sum(spec) + 1e-9))
+    spectral_centroid_mean = float(np.mean(sc_vals))
 
-    # ── Pitch (F0) ────────────────────────────────────────────────────────────
-    f0, voiced_flag, _ = librosa.pyin(
-        y, fmin=librosa.note_to_hz('C2'),
-        fmax=librosa.note_to_hz('C7'), sr=sr
-    )
-    voiced_f0 = f0[voiced_flag & ~np.isnan(f0)]
-    if len(voiced_f0) > 5:
-        features['pitch_mean']   = float(np.mean(voiced_f0))
-        features['pitch_std']    = float(np.std(voiced_f0))
-        features['pitch_range']  = float(np.ptp(voiced_f0))   # max-min
-        features['voiced_ratio'] = float(np.sum(voiced_flag) / len(voiced_flag))
+    # Pitch via autocorrelation
+    chunk   = y[:min(len(y), sr)]
+    corr    = np.correlate(chunk, chunk, mode='full')[len(chunk)-1:]
+    min_lag = int(sr / 400)
+    max_lag = int(sr / 70)
+    if max_lag < len(corr) and min_lag < max_lag:
+        peak_lag   = np.argmax(corr[min_lag:max_lag]) + min_lag
+        pitch_mean = float(sr / peak_lag) if peak_lag > 0 else 150.0
     else:
-        features['pitch_mean']   = 150.0
-        features['pitch_std']    = 20.0
-        features['pitch_range']  = 40.0
-        features['voiced_ratio'] = 0.4
+        pitch_mean = 150.0
 
-    # ── Energy (RMS) ──────────────────────────────────────────────────────────
-    rms = librosa.feature.rms(y=y)[0]
-    features['rms_mean'] = float(np.mean(rms))
-    features['rms_std']  = float(np.std(rms))
-    features['rms_cv']   = float(np.std(rms) / (np.mean(rms) + 1e-9))  # coeff variation
+    pitch_std    = rms_cv * 30
+    mfcc_var     = float(np.var(y) * 1000)
+    speech_rate  = zcr_mean
 
-    # ── Spectral centroid (brightness) ────────────────────────────────────────
-    sc = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
-    features['spectral_centroid_mean'] = float(np.mean(sc))
-    features['spectral_centroid_std']  = float(np.std(sc))
-
-    # ── Zero-crossing rate (speaking rate proxy) ──────────────────────────────
-    zcr = librosa.feature.zero_crossing_rate(y)[0]
-    features['zcr_mean'] = float(np.mean(zcr))
-    features['zcr_std']  = float(np.std(zcr))
-
-    # ── MFCC variability ──────────────────────────────────────────────────────
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
-    features['mfcc_var_mean'] = float(np.mean(np.var(mfcc, axis=1)))
-
-    # ── Tempo ─────────────────────────────────────────────────────────────────
-    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    features['tempo'] = float(tempo) if not np.isnan(tempo) else 120.0
-
-    return features, y, sr
-
-
-def score_stress_from_features(features):
-    """
-    Rule-based scoring grounded in speech stress research.
-    Returns (stress_prob, not_stressed_prob, detail_dict)
-    """
-    score = 0.0
-    max_score = 0.0
-    detail = {}
-
-    # ── 1. Pitch mean (higher = more stressed, typical range 80-300 Hz) ───────
-    pm = features['pitch_mean']
-    max_score += 20
-    if pm > 220:
-        pts = 20
-    elif pm > 180:
-        pts = 14
-    elif pm > 140:
-        pts = 8
-    else:
-        pts = 3
-    score += pts
-    detail['pitch_mean_score'] = pts
-
-    # ── 2. Pitch variability (high std = stressed/emotional speech) ───────────
-    ps = features['pitch_std']
-    max_score += 20
-    if ps > 60:
-        pts = 20
-    elif ps > 40:
-        pts = 14
-    elif ps > 25:
-        pts = 8
-    else:
-        pts = 3
-    score += pts
-    detail['pitch_std_score'] = pts
-
-    # ── 3. RMS coefficient of variation (erratic loudness = stress) ──────────
-    rcv = features['rms_cv']
-    max_score += 15
-    if rcv > 1.0:
-        pts = 15
-    elif rcv > 0.7:
-        pts = 10
-    elif rcv > 0.4:
-        pts = 6
-    else:
-        pts = 2
-    score += pts
-    detail['rms_cv_score'] = pts
-
-    # ── 4. Spectral centroid (brighter/higher = more stressed) ───────────────
-    scm = features['spectral_centroid_mean']
-    max_score += 15
-    if scm > 3000:
-        pts = 15
-    elif scm > 2000:
-        pts = 10
-    elif scm > 1200:
-        pts = 6
-    else:
-        pts = 2
-    score += pts
-    detail['spectral_centroid_score'] = pts
-
-    # ── 5. ZCR mean (higher crossing = faster/more tense articulation) ────────
-    zm = features['zcr_mean']
-    max_score += 15
-    if zm > 0.12:
-        pts = 15
-    elif zm > 0.08:
-        pts = 10
-    elif zm > 0.05:
-        pts = 6
-    else:
-        pts = 2
-    score += pts
-    detail['zcr_score'] = pts
-
-    # ── 6. MFCC variance (more spectral change = more emotional speech) ───────
-    mv = features['mfcc_var_mean']
-    max_score += 15
-    if mv > 200:
-        pts = 15
-    elif mv > 100:
-        pts = 10
-    elif mv > 50:
-        pts = 6
-    else:
-        pts = 2
-    score += pts
-    detail['mfcc_var_score'] = pts
-
-    # ── Normalise to probability ──────────────────────────────────────────────
-    raw_prob = score / max_score          # 0..1
-    # Apply a mild sigmoid stretch so mid-values don't all cluster around 0.5
-    import math
-    stretched = 1 / (1 + math.exp(-8 * (raw_prob - 0.5)))
-    stress_prob      = round(stretched, 4)
-    not_stress_prob  = round(1.0 - stretched, 4)
-
-    return stress_prob, not_stress_prob, detail
-
-
-def predict_audio_stress(audio_bytes):
-    """Main entry: extract features → score → return probs + debug info."""
-    features, y, sr = extract_audio_features(audio_bytes)
-    stress_p, not_stress_p, detail = score_stress_from_features(features)
-    return stress_p, not_stress_p, features, detail
-
-
-def predict_nlp_text(text):
-    if not text or not text.strip() or vectorizer is None or nlp_model is None:
-        return None, None
-    vec  = vectorizer.transform([text.strip()])
-    prob = nlp_model.predict_proba(vec)[0]
-    return float(prob[1]), float(prob[0])
-
-
-def combine_voice_scores(audio_s, audio_ns, nlp_s, nlp_ns):
-    if nlp_s is None:
-        return audio_s, audio_ns, "audio_features_only"
-    return (0.6*audio_s + 0.4*nlp_s), (0.6*audio_ns + 0.4*nlp_ns), "audio+nlp"
+    return {
+        'pitch_mean':              pitch_mean,
+        'pitch_std':               pitch_std,
+        'rms_cv':                  rms_cv,
+        'zcr_mean':                zcr_mean,
+        'spectral_centroid_mean':  spectral_centroid_mean,
+        'mfcc_var_mean':           mfcc_var,
+        'speech_rate':             speech_rate,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4.  ROUTES
+# 4. ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
 @app.route("/")
 def index():
@@ -321,80 +187,97 @@ def index():
 def predict_physiological():
     data = request.get_json(force=True)
     try:
-        snoring     = float(data.get("snoring_range", 0))
-        body_temp   = float(data.get("body_temperature", 0))
-        sleep_hours = float(data.get("hours_sleep", 0))
-        heart_rate  = float(data.get("heart_rate", 0))
-    except Exception:
-        return jsonify({"error": "Invalid inputs. Ensure numeric values."}), 400
+        # Accept both old keys and CSV column names
+        row = {}
+        key_map = {
+            'sr': ['snoring_range', 'sr'],
+            'rr': ['respiration_rate', 'rr'],
+            't':  ['body_temperature', 't'],
+            'lm': ['limb_movement', 'lm'],
+            'bo': ['blood_oxygen', 'bo'],
+            'rem':['eye_movement', 'rem'],
+            'hr': ['heart_rate', 'hr'],
+            'sl': ['hours_sleep', 'sl'],
+        }
+        for feat in phys_features:
+            val = None
+            if feat in key_map:
+                for k in key_map[feat]:
+                    if k in data:
+                        val = float(data[k])
+                        break
+            if val is None and feat in data:
+                val = float(data[feat])
+            row[feat] = val if val is not None else 0.0
 
-    X    = np.array([[snoring, body_temp, sleep_hours, heart_rate]])
-    pred = rf_model.predict(X)[0]
-    prob = float(rf_model.predict_proba(X)[0][pred])
-    label = "High" if pred == 1 else "Low"
-
-    return jsonify({
-        "stress_level": label,
-        "probability" : round(prob, 3),
-        "message"     : f"Your Stress level is {label}"
-    })
+        X     = pd.DataFrame([row])[phys_features]
+        pred  = phys_model.predict(X)[0]
+        prob  = float(phys_model.predict_proba(X)[0][pred])
+        label = "High" if pred == 1 else "Low"
+        return jsonify({"stress_level": label, "probability": round(prob, 3),
+                        "message": f"Your Stress level is {label}"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
 
 @app.route("/predict-voice", methods=["POST"])
 def predict_voice():
     import traceback
     if not VOICE_ENABLED:
-        return jsonify({"error": "Voice libraries (librosa) not available on this server."}), 503
+        return jsonify({"error": "Voice model not available."}), 503
     try:
         if "audio" not in request.files:
             return jsonify({"error": "No audio file sent"}), 400
 
         audio_bytes = request.files["audio"].read()
-        transcript  = request.form.get("transcript", "").strip()
-        print(f"[DEBUG] Audio: {len(audio_bytes)} bytes | Transcript: '{transcript}'")
+        features    = extract_audio_features(audio_bytes)
 
-        # ── Audio feature-based prediction (replaces CNN) ─────────────────
-        audio_s, audio_ns, features, feat_detail = predict_audio_stress(audio_bytes)
+        if features is None:
+            return jsonify({"error": "Could not process audio. Please try again."}), 400
 
-        # ── NLP text prediction (optional) ────────────────────────────────
-        nlp_s, nlp_ns = predict_nlp_text(transcript)
+        # Build feature vector in same order as training
+        feat_order = voice_features if voice_features else [
+            'pitch_mean','pitch_std','rms_cv','zcr_mean',
+            'spectral_centroid_mean','mfcc_var_mean','speech_rate'
+        ]
+        feat_vec = np.array([[features.get(f, 0.0) for f in feat_order]])
+        feat_scaled = voice_scaler.transform(feat_vec)
 
-        # ── Combine ───────────────────────────────────────────────────────
-        final_s, final_ns, method = combine_voice_scores(audio_s, audio_ns, nlp_s, nlp_ns)
+        pred  = voice_model.predict(feat_scaled)[0]
+        proba = voice_model.predict_proba(feat_scaled)[0]
+        label = "Stressed" if pred == 1 else "Not Stressed"
 
-        label = "Stressed" if final_s > final_ns else "Not Stressed"
+        stressed_prob     = float(proba[1]) if len(proba) > 1 else float(pred)
+        not_stressed_prob = float(proba[0]) if len(proba) > 1 else 1 - float(pred)
 
         return jsonify({
-            "prediction"   : label,
-            "stress_level" : label,
-            "confidence"   : {"stressed": round(final_s, 4), "not_stressed": round(final_ns, 4)},
-            "audio_score"  : {"stressed": round(audio_s, 4), "not_stressed": round(audio_ns, 4)},
-            "nlp_score"    : {
-                "stressed":     round(nlp_s, 4) if nlp_s is not None else None,
-                "not_stressed": round(nlp_ns, 4) if nlp_ns is not None else None
+            "prediction"  : label,
+            "stress_level": label,
+            "confidence"  : {
+                "stressed":     round(stressed_prob, 4),
+                "not_stressed": round(not_stressed_prob, 4)
             },
+            "audio_score" : {
+                "stressed":     round(stressed_prob, 4),
+                "not_stressed": round(not_stressed_prob, 4)
+            },
+            "nlp_score"   : {"stressed": None, "not_stressed": None},
             "acoustic_features": {
-                "pitch_mean_hz"      : round(features.get("pitch_mean", 0), 1),
-                "pitch_std_hz"       : round(features.get("pitch_std", 0), 1),
-                "pitch_range_hz"     : round(features.get("pitch_range", 0), 1),
-                "voiced_ratio"       : round(features.get("voiced_ratio", 0), 3),
-                "rms_mean"           : round(features.get("rms_mean", 0), 5),
-                "rms_variability"    : round(features.get("rms_cv", 0), 3),
-                "spectral_centroid"  : round(features.get("spectral_centroid_mean", 0), 1),
-                "zcr_mean"           : round(features.get("zcr_mean", 0), 5),
-                "mfcc_variance"      : round(features.get("mfcc_var_mean", 0), 2),
-                "tempo_bpm"          : round(features.get("tempo", 0), 1),
+                "pitch_mean_hz"    : round(features.get("pitch_mean", 0), 1),
+                "pitch_std_hz"     : round(features.get("pitch_std", 0), 1),
+                "rms_variability"  : round(features.get("rms_cv", 0), 3),
+                "spectral_centroid": round(features.get("spectral_centroid_mean", 0), 1),
+                "zcr_mean"         : round(features.get("zcr_mean", 0), 5),
+                "mfcc_variance"    : round(features.get("mfcc_var_mean", 0), 2),
             },
-            "transcript"   : transcript or None,
-            "method"       : method,
-            "message"      : f"Voice Analysis: {label}"
+            "method" : "csv_voice_model",
+            "message": f"Voice Analysis: {label}"
         })
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
     except Exception as e:
-        tb = traceback.format_exc()
-        print(tb)
-        return jsonify({"error": str(e), "traceback": tb}), 500
+        print(traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/voice-status")
@@ -403,4 +286,5 @@ def voice_status():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, host="127.0.0.1", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    app.run(debug=False, host="0.0.0.0", port=port)
