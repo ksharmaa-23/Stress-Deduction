@@ -48,39 +48,49 @@
       <!-- PHYSIOLOGICAL TAB -->
       <div id="tab-physio" class="tab-content active">
         <div class="form-grid">
+
           <div class="form-group">
-            <label>Snoring Range (0-100)</label>
+            <label>Snoring Range <span class="hint">(0 – 100)</span></label>
             <input id="snoring" type="number" placeholder="e.g. 45" min="0" max="100"/>
           </div>
+
           <div class="form-group">
-            <label>Respiration Rate</label>
+            <label>Respiration Rate <span class="hint">(breaths/min)</span></label>
             <input id="rr" type="number" placeholder="e.g. 15" min="0" max="40"/>
           </div>
+
           <div class="form-group">
-            <label>Body Temperature (°F)</label>
-            <input id="temp" type="number" placeholder="e.g. 98.6" min="90" max="110"/>
+            <label>Body Temperature <span class="hint">(°F)</span></label>
+            <input id="temp" type="number" placeholder="e.g. 98.6" min="90" max="110" step="0.1"/>
           </div>
+
           <div class="form-group">
-            <label>Limb Movement</label>
+            <label>Limb Movement <span class="hint">(0 – 30)</span></label>
             <input id="lm" type="number" placeholder="e.g. 8" min="0" max="30"/>
           </div>
+
           <div class="form-group">
-            <label>Blood Oxygen (%)</label>
+            <label>Blood Oxygen <span class="hint">(%)</span></label>
             <input id="bo" type="number" placeholder="e.g. 97" min="80" max="100"/>
           </div>
+
           <div class="form-group">
-            <label>Eye Movement (REM)</label>
+            <label>Eye Movement <span class="hint">(REM, 0 – 30)</span></label>
             <input id="rem" type="number" placeholder="e.g. 12" min="0" max="30"/>
           </div>
+
           <div class="form-group">
-            <label>Hours of Sleep</label>
-            <input id="hours" type="number" placeholder="e.g. 6" min="0" max="12"/>
+            <label>Hours of Sleep <span class="hint">(hrs)</span></label>
+            <input id="hours" type="number" placeholder="e.g. 6" min="0" max="12" step="0.5"/>
           </div>
+
           <div class="form-group">
-            <label>Heart Rate (BPM)</label>
+            <label>Heart Rate <span class="hint">(BPM)</span></label>
             <input id="hr" type="number" placeholder="e.g. 72" min="40" max="220"/>
           </div>
+
         </div>
+
         <button id="predictBtn" class="btn-primary">Analyze Stress →</button>
         <div id="result" class="result-box"></div>
       </div>
@@ -94,7 +104,7 @@
           <span id="recordLabel">Start Recording</span>
         </button>
         <div id="recordTimer" class="hidden timer">
-          Recording... <span id="timerCount">0</span>s
+          Recording… <span id="timerCount">0</span>s
         </div>
 
         <div id="audioPlayback" class="hidden">
@@ -135,8 +145,8 @@
         </div>
       </div>
 
-    </div>
-  </div>
+    </div><!-- end right-panel -->
+  </div><!-- end container -->
 
   <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
